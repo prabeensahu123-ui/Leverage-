@@ -3,7 +3,7 @@ import requests
 
 st.title("🚀 Live Crypto & Gold Tracker")
 
-# Dropdown to select coin / asset
+# Dropdown to select coin / asset (using correct CoinGecko IDs)
 asset_options = {
     "Bitcoin (BTC)": "bitcoin",
     "PAX Gold (PAXG - Digital Gold)": "pax-gold",
