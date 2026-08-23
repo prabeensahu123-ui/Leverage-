@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
-from streamlit_autorefresh import st_autorefresh
+import time
 
 # Configure mobile screen layout
 st.set_page_config(
@@ -11,24 +11,25 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Auto-refresh every 5 seconds to keep live data flowing seamlessly
-st_autorefresh(interval=5000, limit=None, key="delta_tf_loop")
-
 st.markdown("""
     <style>
     .main { padding: 0px; }
     .stButton button { width: 100%; border-radius: 8px; font-weight: bold; }
     </style>
-""", آہUNSAFE_HTML=True) if "ah_unsafe" in globals() else None
+""", unsafe_allow_html=True)
 
 st.markdown("### ⚡ Pro Multi-Timeframe Terminal")
 
 # 1. Asset & Timeframe Controls
-col_s1, col_s2 = st.columns(2)
+col_s1, col_s2, col_s3 = st.columns([1, 1, 1])
 with col_s1:
     symbol_choice = st.selectbox("Asset", ["BTCUSD", "ETHUSD", "SOLUSD"])
 with col_s2:
     timeframe = st.selectbox("Timeframe", ["1m", "3m", "5m", "15m", "30m", "1h", "4h"])
+with col_s3:
+    st.write("")
+    if st.button("🔄 Refresh Data"):
+        st.rerun()
 
 # --- FETCH LIVE DATA FROM DELTA EXCHANGE ---
 live_price = 77299.0
@@ -47,16 +48,15 @@ except Exception:
     pass
 
 # --- TIMEFRAME-SPECIFIC TECHNICAL PROJECTIONS ---
-# Lower timeframes (1m, 3m) focus on tight scalping nodes; Higher frames focus on trend execution.
 if timeframe in ["1m", "3m"]:
-    tf_multiplier = 0.003  # Tight bands for scalping
-    strategy_type = "⚡ Scalping Setup (High Frequency)"
+    tf_multiplier = 0.003
+    strategy_type = "⚡ Scalping Setup (High Frequency - Tight Ranges)"
 elif timeframe in ["5m", "15m"]:
-    tf_multiplier = 0.008  # Balanced intraday swings
-    strategy_type = "🎯 Intraday Trend Setup (Recommended)"
+    tf_multiplier = 0.008
+    strategy_type = "🎯 Intraday Trend Setup (Recommended 5m Action Plan)"
 else:
-    tf_multiplier = 0.020  # Wider swing structure for 30m / 1h / 4h
-    strategy_type = "🏛️ Macro Swing Setup"
+    tf_multiplier = 0.020
+    strategy_type = "🏛️ Macro Swing Setup (Higher Timeframe Structure)"
 
 rsi_val = min(max(50 + (price_change_24h * 3.0), 20.0), 90.0)
 
@@ -91,21 +91,20 @@ st.markdown("---")
 
 # --- ACTIONABLE TRADE SETUP BLOCK ---
 st.subheader("🎯 Actionable Trade Plan")
-st.info(f"**Mode:** {strategy_type}")
+st.info(f"**Active Mode:** {strategy_type}")
 
-# Calculate exact execution metrics based on selected timeframe depth
 if price_change_24h >= 0:
     bias = "LONG / BUY SETUP 🟢"
     entry_point = live_price
     tp_target = live_price * (1 + tf_multiplier)
     sl_target = live_price * (1 - (tf_multiplier * 0.5))
-    advice = f"Momentum on the {timeframe} chart is favoring continuation upward. Look for entries near current structure."
+    advice = f"Based on the **{timeframe}** structure, momentum favors continuation upward. Use this zone for scaling in."
 else:
     bias = "SHORT / SELL SETUP 🔴"
     entry_point = live_price
     tp_target = live_price * (1 - tf_multiplier)
     sl_target = live_price * (1 + (tf_multiplier * 0.5))
-    advice = f"Downward pressure detected on the {timeframe} window. Look to short resistance rallies."
+    advice = f"Based on the **{timeframe}** structure, downward pressure is active. Look to short resistance bounces."
 
 st.markdown(f"**Analysis Bias:** {bias}")
 st.write(f"💡 *{advice}*")
