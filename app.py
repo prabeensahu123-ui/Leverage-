@@ -61,23 +61,44 @@ try:
 except Exception:
     pass
 
-# --- TECHNICAL ENGINE: VOLATILITY & MOMENTUM CALCULATION ---
-if timeframe in ["1m", "3m"]:
-    tf_multiplier = 0.0025  
-    engine_mode = "⚡ Scalp Mode (Micro Structure)"
-elif timeframe in ["5m", "15m"]:
-    tf_multiplier = 0.0075  
-    engine_mode = "🎯 Intraday Trend Mode (Recommended)"
+# --- FIXED TECHNICAL ENGINE: TIMEFRAME-DRIVEN SCALING ---
+# Each timeframe now explicitly alters volatility depth, target bands, and momentum calculation
+if timeframe == "1m":
+    tf_multiplier = 0.0012
+    tf_weight = 1.2
+    engine_mode = "⚡ Micro Scalp (1m Structure)"
+elif timeframe == "3m":
+    tf_multiplier = 0.0020
+    tf_weight = 1.4
+    engine_mode = "⚡ Fast Scalp (3m Structure)"
+elif timeframe == "5m":
+    tf_multiplier = 0.0045
+    tf_weight = 1.8
+    engine_mode = "🎯 Intraday Momentum (5m)"
+elif timeframe == "15m":
+    tf_multiplier = 0.0085
+    tf_weight = 2.2
+    engine_mode = "🎯 Intraday Trend (15m)"
+elif timeframe == "30m":
+    tf_multiplier = 0.0140
+    tf_weight = 2.8
+    engine_mode = "🏛️ Session Swing (30m)"
+elif timeframe == "1h":
+    tf_multiplier = 0.0220
+    tf_weight = 3.5
+    engine_mode = "🏛️ Hourly Trend (1h)"
 else:
-    tf_multiplier = 0.0180  
-    engine_mode = "🏛️ Macro Swing Mode"
+    tf_multiplier = 0.0350
+    tf_weight = 4.5
+    engine_mode = "🏛️ Macro Structure (4h)"
 
-rsi_val = min(max(50 + (price_change_24h * 2.5), 15.0), 95.0)
+# Timeframe-sensitive RSI simulation mapping to ensure output shifts when you change the dropdown
+rsi_val = min(max(50 + (price_change_24h * tf_weight), 10.0), 90.0)
 
 # Display Metrics Header
 m1, m2, m3 = st.columns(3)
 m1.metric("Live Price", f"${live_price:,.2f}", f"{price_change_24h:.2f}%")
-m2.metric("TF Context", timeframe)
+m2.metric("Active TF", timeframe)
 m3.metric("RSI Momentum", f"{rsi_val:.1f}")
 
 st.markdown("---")
@@ -85,19 +106,19 @@ st.markdown("---")
 # --- STRUCTURAL TRAJECTORY CHART ---
 st.subheader(f"📈 {symbol_choice} Trend Map ({timeframe})")
 
-np.random.seed(int(live_price) % 500)
+np.random.seed(int(live_price) + len(timeframe))
 history_len = 18
-past_path = np.linspace(live_price * (1 - tf_multiplier * 0.4), live_price, history_len)
+past_path = np.linspace(live_price * (1 - tf_multiplier * 0.5), live_price, history_len)
 
 future_len = 7
-if price_change_24h >= 0:
+if rsi_val >= 50:
     projected_path = np.linspace(live_price, live_price * (1 + tf_multiplier), future_len)
 else:
     projected_path = np.linspace(live_price, live_price * (1 - tf_multiplier), future_len)
 
 chart_df = pd.DataFrame({
     "Historical Price": list(past_path) + [None] * future_len,
-    f"Optimized Prediction ({timeframe})": [None] * history_len + list(projected_path)
+    f"Timeframe Projection ({timeframe})": [None] * history_len + list(projected_path)
 })
 st.line_chart(chart_df, height=200)
 
@@ -107,20 +128,20 @@ st.markdown("---")
 st.subheader("🎯 Trade Plan & Execution Matrix")
 st.info(f"**Engine Status:** {engine_mode}")
 
-if price_change_24h >= 0:
+if rsi_val >= 50:
     bias = "LONG / BUY SETUP 🟢"
     entry_point = live_price
-    trigger_point = live_price * (1 + (tf_multiplier * 0.2))
-    tp_target = live_price * (1 + tf_multiplier)
-    sl_target = live_price * (1 - (tf_multiplier * 0.6))
-    advice = f"Higher timeframe structure on **{timeframe}** indicates bullish continuation."
+    trigger_point = live_price * (1 + (tf_multiplier * 0.3))
+    tp_target = live_price * (1 + (tf_multiplier * 1.5))
+    sl_target = live_price * (1 - tf_multiplier)
+    advice = f"The selected **{timeframe}** structure favors continuation upwards."
 else:
     bias = "SHORT / SELL SETUP 🔴"
     entry_point = live_price
-    trigger_point = live_price * (1 - (tf_multiplier * 0.2))
-    tp_target = live_price * (1 - tf_multiplier)
-    sl_target = live_price * (1 + (tf_multiplier * 0.6))
-    advice = f"Higher timeframe structure on **{timeframe}** indicates downward pressure."
+    trigger_point = live_price * (1 - (tf_multiplier * 0.3))
+    tp_target = live_price * (1 - (tf_multiplier * 1.5))
+    sl_target = live_price * (1 + tf_multiplier)
+    advice = f"The selected **{timeframe}** structure indicates distribution downwards."
 
 st.markdown(f"**Market Bias:** {bias}")
 st.write(f"💡 *{advice}*")
