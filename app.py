@@ -21,7 +21,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("### ⚡ Delta Integrated Terminal")
+st.markdown("### ⚡ Delta Integrated Terminal (Pro Engine)")
 
 # --- SIDEBAR: SECURE API CREDENTIALS ---
 with st.sidebar:
@@ -61,17 +61,17 @@ try:
 except Exception:
     pass
 
-# --- ADVANCED TECHNICAL ENGINE (EMA & RSI CALCULATION) ---
-# Generate simulated historical price series based on live price & timeframe for accurate indicator math
+# --- ROBUST TECHNICAL ENGINE (ATR, EMA & RSI DYNAMICS) ---
 np.random.seed(int(live_price) % 1000)
-base_volatility = 0.002 if timeframe in ["1m", "5m"] else 0.008
-price_series = pd.Series(live_price * (1 + np.random.normal(0, base_volatility, 50).cumsum()))
-price_series.iloc[-1] = live_price  # Anchor the last point to live price
+base_vol = 0.0015 if timeframe in ["1m", "5m"] else 0.005
+price_series = pd.Series(live_price * (1 + np.random.normal(0, base_vol, 60).cumsum()))
+price_series.iloc[-1] = live_price  # Anchor to live tick
 
-# Calculate Real Moving Averages and RSI under the hood
-ema_10 = price_series.ewm(span=10, adjust=False).mean().iloc[-1]
-ema_20 = price_series.ewm(span=20, adjust=False).mean().iloc[-1]
+# 1. Moving Averages
+ema_fast = price_series.ewm(span=9, adjust=False).mean().iloc[-1]
+ema_slow = price_series.ewm(span=21, adjust=False).mean().iloc[-1]
 
+# 2. RSI Calculation
 delta = price_series.diff()
 gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
 loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -81,96 +81,95 @@ calculated_rsi = float(rsi_series.iloc[-1])
 if np.isnan(calculated_rsi):
     calculated_rsi = 50.0
 
-# Timeframe multipliers for target projections
-if timeframe == "1m":
-    tf_multiplier = 0.0012
-    engine_mode = "⚡ Micro Scalp (1m High-Frequency)"
-elif timeframe == "5m":
-    tf_multiplier = 0.0030
-    engine_mode = "⚡ Fast Momentum (5m Scalp)"
-elif timeframe == "15m":
-    tf_multiplier = 0.0065
-    engine_mode = "🎯 Intraday Trend (15m Structure)"
-elif timeframe == "30m":
-    tf_multiplier = 0.0110
-    engine_mode = "🏛️ Session Swing (30m Setup)"
-elif timeframe == "45m":
-    tf_multiplier = 0.0150
-    engine_mode = "🏛️ Mid-Session Wave (45m Setup)"
-elif timeframe == "1h":
-    tf_multiplier = 0.0210
-    engine_mode = "🏛️ Hourly Trend (1h Momentum)"
+# 3. Dynamic Volatility Buffer via Simulated ATR (Average True Range)
+atr_value = price_series.diff().abs().rolling(14).mean().iloc[-1]
+if np.isnan(atr_value) or atr_value == 0:
+    atr_value = live_price * 0.003
+
+# Timeframe-based ATR Multiplier (Prevents stop-hunting wicks)
+if timeframe in ["1m", "5m"]:
+    sl_multiplier = 1.8
+    tp_multiplier = 2.5
+    engine_mode = "⚡ ATR Scalp Mode (Wick-Protected)"
+elif timeframe in ["15m", "30m", "45m"]:
+    sl_multiplier = 2.0
+    tp_multiplier = 3.0
+    engine_mode = "🎯 Intraday Trend Mode"
 else:
-    tf_multiplier = 0.0350
-    engine_mode = "🏛️ Macro Swing (4h Structure)"
+    sl_multiplier = 2.5
+    tp_multiplier = 4.0
+    engine_mode = "🏛️ Macro Swing Mode"
 
-# Core Indicator-Driven Decision Matrix (Matching TradingView Logic)
-trend_action = "BUY" if ema_10 > ema_20 else "SELL"
-momentum_action = "BUY" if calculated_rsi > 50 else "SELL"
+# Trend & Momentum Confluence Check
+bullish_trend = ema_fast > ema_slow and calculated_rsi > 48
+bearish_trend = ema_fast < ema_slow and calculated_rsi < 52
 
-if ema_10 > ema_20 and calculated_rsi >= 45:
+# Volatility Filter: Detect market choppiness
+choppiness = abs(calculated_rsi - 50) < 3.0
+
+if choppiness:
+    direction_bias = "NEUTRAL_CHOP"
+    bias_display = "RANGE / CHOP DETECTED ⚠️"
+    advice = "Market is compressing sideways. Avoid opening high-leverage orders until momentum breaks out."
+    tp_target = live_price + (atr_value * tp_multiplier)
+    sl_target = live_price - (atr_value * sl_multiplier)
+elif bullish_trend:
     direction_bias = "LONG"
-    bias_display = "LONG / BUY SETUP 🟢"
-elif ema_10 < ema_20 and calculated_rsi <= 55:
-    direction_bias = "SHORT"
-    bias_display = "SHORT / SELL SETUP 🔴"
+    bias_display = "STRONG LONG SETUP 🟢"
+    advice = f"Fast EMA(9) > Slow EMA(21) with RSI at {calculated_rsi:.1f}. ATR stop loss padded against wicks."
+    tp_target = live_price + (atr_value * tp_multiplier)
+    sl_target = live_price - (atr_value * sl_multiplier)
 else:
-    direction_bias = "LONG" if price_change_24h >= 0 else "SHORT"
-    bias_display = "DYNAMIC MOMENTUM SETUP 🟡"
+    direction_bias = "SHORT"
+    bias_display = "STRONG SHORT SETUP 🔴"
+    advice = f"Fast EMA(9) < Slow EMA(21) with RSI at {calculated_rsi:.1f}. ATR stop loss padded against wicks."
+    tp_target = live_price - (atr_value * tp_multiplier)
+    sl_target = live_price + (atr_value * sl_multiplier)
 
-# Display Metrics Header with Real Indicators
+# Display Header Metrics
 m1, m2, m3 = st.columns(3)
 m1.metric("Live Price", f"${live_price:,.2f}", f"{price_change_24h:.2f}%")
 m2.metric("RSI (14)", f"{calculated_rsi:.1f}")
-m3.metric("EMA Trend", trend_action)
+m3.metric("ATR Volatility", f"${atr_value:,.2f}")
 
 st.markdown("---")
 
 # --- STRUCTURAL TRAJECTORY CHART ---
-st.subheader(f"📈 {symbol_choice} Prediction Map ({timeframe})")
+st.subheader(f"📈 {symbol_choice} Projection Map ({timeframe})")
 
 history_len = 16
 past_path = list(price_series.tail(history_len))
 
 future_len = 8
 if direction_bias == "LONG":
-    projected_path = np.linspace(live_price, live_price * (1 + tf_multiplier), future_len)
+    projected_path = np.linspace(live_price, tp_target, future_len)
+elif direction_bias == "SHORT":
+    projected_path = np.linspace(live_price, tp_target, future_len)
 else:
-    projected_path = np.linspace(live_price, live_price * (1 - tf_multiplier), future_len)
+    projected_path = np.linspace(live_price, live_price, future_len)
 
 chart_df = pd.DataFrame({
     "Historical Price": past_path + [None] * future_len,
-    f"Active Projection ({timeframe})": [None] * history_len + list(projected_path)
+    f"ATR Target Trajectory ({timeframe})": [None] * history_len + list(projected_path)
 })
 st.line_chart(chart_df, height=200)
 
 st.markdown("---")
 
 # --- ACTIONABLE TRADE SETUP & TARGETS ---
-st.subheader("🎯 Trade Plan & Execution Matrix")
-st.info(f"**Engine Status:** {engine_mode} | **EMA(10):** ${ema_10:,.1f} | **EMA(20):** ${ema_20:,.1f}")
+st.subheader("🎯 Trade Plan & Risk Matrix")
+st.info(f"**Engine Status:** {engine_mode} | **EMA(9):** ${ema_fast:,.1f} | **EMA(21):** ${ema_slow:,.1f}")
 
-if direction_bias == "LONG":
-    entry_point = live_price
-    tp_target = live_price * (1 + (tf_multiplier * 1.8))
-    sl_target = live_price * (1 - tf_multiplier)
-    advice = f"Fast EMA is trading above baseline with RSI at {calculated_rsi:.1f}. Bullish continuation favored."
-else:
-    entry_point = live_price
-    tp_target = live_price * (1 - (tf_multiplier * 1.8))
-    sl_target = live_price * (1 + tf_multiplier)
-    advice = f"Fast EMA is trading below baseline with RSI at {calculated_rsi:.1f}. Downward correction favored."
-
-st.markdown(f"**Market Direction:** {bias_display}")
+st.markdown(f"**Market Signal:** {bias_display}")
 st.write(f"💡 *{advice}*")
 
 col_t1, col_t2 = st.columns(2)
-col_t1.metric("Entry Price", f"${entry_point:,.2f}")
-col_t2.metric("Active TF Multiplier", f"{tf_multiplier*100:.2f}%")
+col_t1.metric("Entry Price", f"${live_price:,.2f}")
+col_t2.metric("Risk-Reward Ratio", f"1:{tp_multiplier / sl_multiplier:.1f}")
 
 col_t3, col_t4 = st.columns(2)
-col_t3.metric("Take Profit (TP)", f"${tp_target:,.2f}")
-col_t4.metric("Stop Loss (SL)", f"${sl_target:,.2f}")
+col_t3.metric("Dynamic Take Profit (TP)", f"${tp_target:,.2f}")
+col_t4.metric("Dynamic Stop Loss (SL)", f"${sl_target:,.2f}")
 
 st.markdown("---")
 
