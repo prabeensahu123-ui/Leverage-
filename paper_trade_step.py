@@ -88,10 +88,35 @@ def main():
              "low": low, "close": close, "volume": volume}
 
     state = load_state()
-    current_price = close[-1]
-    current_time = int(times[-1])
 
-    print(f"Latest bar: {datetime.fromtimestamp(current_time, tz=timezone.utc)} | Price: {current_price:.2f}")
+    # Catch up on every hourly bar since the last time we ran, not just
+    # the latest one - this makes the script safe to run at ANY cadence
+    # (hourly, daily, whenever you remember), since it processes each
+    # missed hour in order rather than skipping ahead.
+    last_processed = state.get("last_processed_time")
+    if last_processed is None:
+        bars_to_process = [len(times) - 1]  # first ever run - just check current bar
+    else:
+        bars_to_process = [i for i in range(len(times)) if times[i] > last_processed]
+        if not bars_to_process:
+            print("No new bars since last run - nothing to do yet.")
+            return
+
+    print(f"Processing {len(bars_to_process)} new hourly bar(s) since last run...")
+
+    for bar_idx in bars_to_process:
+        current_price = close[bar_idx]
+        current_time = int(times[bar_idx])
+        _process_bar(state, ohlcv, close, bar_idx, current_price, current_time)
+
+    state["last_processed_time"] = int(times[-1])
+    save_state(state)
+    print(f"\nCurrent paper equity: {state['equity']:.2f}")
+    print("Done.\n")
+
+
+def _process_bar(state, ohlcv, close, bar_idx, current_price, current_time):
+    print(f"\n--- Bar: {datetime.fromtimestamp(current_time, tz=timezone.utc)} | Price: {current_price:.2f} ---")
 
     # --- Step 1: check if we have an open position, and if it resolved ---
     if state["open_position"] is not None:
@@ -128,56 +153,55 @@ def main():
             state["open_position"]["bars_open"] = bars_open
             print(f"Position still open: direction={direction} entry={entry_price:.2f} "
                   f"bars_open={bars_open}/{MAX_HOLDING_BARS}")
+        return  # don't open a new signal on the same bar we just checked/closed one
 
-    # --- Step 2: if no open position, check for a new signal ---
-    if state["open_position"] is None:
-        labels, valid, vol, exit_prices, exit_indices = triple_barrier_labels(
-            close, K_PROFIT, K_STOP, MAX_HOLDING_BARS
-        )
-        X, y, idxs = [], [], []
-        min_history = 60
-        for i in range(min_history, len(close) - 1):
-            if valid[i] and labels[i] != 0:
-                X.append(build_features(ohlcv, i))
-                y.append(1 if labels[i] == 1 else 0)
-                idxs.append(i)
+    # --- Step 2: no open position - check for a new signal, using ONLY
+    # data available up through this bar (no lookahead into later bars) ---
+    ohlcv_so_far = {k: v[:bar_idx + 1] for k, v in ohlcv.items()}
+    close_so_far = close[:bar_idx + 1]
 
-        if len(X) < 100:
-            print("Not enough training data yet - skipping signal generation this run.")
-        else:
-            X, y = np.array(X), np.array(y)
-            model = RandomForestClassifier(n_estimators=150, max_depth=5, random_state=42, min_samples_leaf=10)
-            model.fit(X, y)
+    labels, valid, vol, exit_prices, exit_indices = triple_barrier_labels(
+        close_so_far, K_PROFIT, K_STOP, MAX_HOLDING_BARS
+    )
+    X, y = [], []
+    min_history = 60
+    for i in range(min_history, len(close_so_far) - 1):
+        if valid[i] and labels[i] != 0:
+            X.append(build_features(ohlcv_so_far, i))
+            y.append(1 if labels[i] == 1 else 0)
 
-            current_features = np.array([build_features(ohlcv, len(close) - 1)])
-            prob = model.predict_proba(current_features)[0, 1]
+    if len(X) < 100:
+        print("Not enough training data yet - skipping signal generation this run.")
+        return
 
-            print(f"Model confidence (prob of upward barrier hit first): {prob:.3f}")
+    X, y = np.array(X), np.array(y)
+    model = RandomForestClassifier(n_estimators=150, max_depth=5, random_state=42, min_samples_leaf=10)
+    model.fit(X, y)
 
-            if prob > 0.6 or prob < 0.4:
-                direction = 1 if prob > 0.6 else -1
-                current_vol = vol[-1] if vol[-1] > 0 else np.std(np.diff(np.log(close[-20:])))
-                upper_barrier = current_price * (1 + K_PROFIT * current_vol)
-                lower_barrier = current_price * (1 - K_STOP * current_vol)
+    current_features = np.array([build_features(ohlcv_so_far, bar_idx)])
+    prob = model.predict_proba(current_features)[0, 1]
 
-                state["open_position"] = {
-                    "direction": direction,
-                    "entry_price": current_price,
-                    "upper_barrier": upper_barrier,
-                    "lower_barrier": lower_barrier,
-                    "opened_time": datetime.now(timezone.utc).isoformat(),
-                    "bars_open": 0,
-                    "confidence": float(prob),
-                }
-                print(f"NEW PAPER POSITION OPENED: direction={direction} entry={current_price:.2f} "
-                      f"upper={upper_barrier:.2f} lower={lower_barrier:.2f} confidence={prob:.3f}")
-            else:
-                print("No confident signal this bar - staying flat.")
+    print(f"Model confidence (prob of upward barrier hit first): {prob:.3f}")
 
-    state["last_processed_time"] = current_time
-    save_state(state)
-    print(f"Current paper equity: {state['equity']:.2f}")
-    print("Done.\n")
+    if prob > 0.6 or prob < 0.4:
+        direction = 1 if prob > 0.6 else -1
+        current_vol = vol[bar_idx] if vol[bar_idx] > 0 else np.std(np.diff(np.log(close_so_far[-20:])))
+        upper_barrier = current_price * (1 + K_PROFIT * current_vol)
+        lower_barrier = current_price * (1 - K_STOP * current_vol)
+
+        state["open_position"] = {
+            "direction": direction,
+            "entry_price": current_price,
+            "upper_barrier": upper_barrier,
+            "lower_barrier": lower_barrier,
+            "opened_time": datetime.now(timezone.utc).isoformat(),
+            "bars_open": 0,
+            "confidence": float(prob),
+        }
+        print(f"NEW PAPER POSITION OPENED: direction={direction} entry={current_price:.2f} "
+              f"upper={upper_barrier:.2f} lower={lower_barrier:.2f} confidence={prob:.3f}")
+    else:
+        print("No confident signal this bar - staying flat.")
 
 
 if __name__ == "__main__":
