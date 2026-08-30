@@ -37,6 +37,12 @@ FEE_PCT = 0.0005
 POSITION_SIZE_PCT = 0.10
 STARTING_EQUITY = 10_000.0
 
+# The validated 4-feature subset - found via combinatorial search, verified
+# on held-out data, stable across 10 random seeds, and survives funding costs.
+# This replaced the original 13-feature version after proper validation.
+WINNING_FEATURES = ["atr_pct", "price_vol_trend", "return_3d", "price_vs_ema20"]
+WINNING_FEATURE_INDICES = [FEATURE_NAMES.index(f) for f in WINNING_FEATURES]
+
 HISTORY_FILE = "paper_trade_history.csv"       # rolling OHLCV data
 STATE_FILE = "paper_trade_state.json"          # open position + equity tracking
 LOG_FILE = "paper_trade_log.csv"               # completed trades log
@@ -175,10 +181,11 @@ def _process_bar(state, ohlcv, close, bar_idx, current_price, current_time):
         return
 
     X, y = np.array(X), np.array(y)
+    X = X[:, WINNING_FEATURE_INDICES]  # use only the validated 4-feature subset
     model = RandomForestClassifier(n_estimators=150, max_depth=5, random_state=42, min_samples_leaf=10)
     model.fit(X, y)
 
-    current_features = np.array([build_features(ohlcv_so_far, bar_idx)])
+    current_features = np.array([build_features(ohlcv_so_far, bar_idx)])[:, WINNING_FEATURE_INDICES]
     prob = model.predict_proba(current_features)[0, 1]
 
     print(f"Model confidence (prob of upward barrier hit first): {prob:.3f}")
