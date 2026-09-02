@@ -1,6 +1,6 @@
 """
-app.py - Leverage Bitcoin Signal Engine
-Clean UI + horizontal timeframe pills + auto update + indicators
+app.py - Leverage Signal Engine
+Clear Buy/Sell prediction + Entry / Take Profit / Stop Loss + Holding time
 """
 
 import streamlit as st
@@ -8,32 +8,22 @@ import requests
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier
 
 from ml_features import build_features, FEATURE_NAMES, WINNING_FEATURES
 from triple_barrier import triple_barrier_labels
 from signal_engine import sma, ema, rsi, macd
-from features import atr, volume_zscore
+from features import atr
 from forecasting import ensemble_forecast
 
-# -------------------- PAGE CONFIG --------------------
-st.set_page_config(
-    page_title="Leverage Signal",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="Leverage Signal", layout="centered", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
-    .stButton > button {
-        border-radius: 20px;
-        padding: 0.3rem 0.9rem;
-        font-weight: 600;
-        font-size: 0.85rem;
-    }
-    div[data-testid="stMetricValue"] { font-size: 1.4rem; }
-    .block-container { padding-top: 1.2rem; }
+    .stButton > button { border-radius: 20px; font-weight: 600; font-size: 0.85rem; }
+    div[data-testid="stMetricValue"] { font-size: 1.35rem; }
+    .block-container { padding-top: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -44,42 +34,37 @@ K_PROFIT, K_STOP = 2.0, 2.0
 TOP_PROFILE = {"rsi_center": 64.0, "rsi_range": 8.0, "macd_hist_min": 10.0, "price_vs_ema20_min": 0.3}
 BOTTOM_PROFILE = {"rsi_center": 38.0, "rsi_range": 8.0, "macd_hist_max": -10.0, "price_vs_ema20_max": -0.3}
 
-# Expanded timeframe options closer to reference image
 TIMEFRAMES = {
-    "15m": {"resolution": "15m", "days": 30,  "max_holding": 32, "label": "15m"},
-    "30m": {"resolution": "30m", "days": 45,  "max_holding": 28, "label": "30m"},
-    "1h":  {"resolution": "1h",  "days": 90,  "max_holding": 24, "label": "1h"},
-    "4h":  {"resolution": "4h",  "days": 180, "max_holding": 18, "label": "4h"},
-    "1D":  {"resolution": "1d",  "days": 300, "max_holding": 15, "label": "Daily"},
+    "15m": {"resolution": "15m", "days": 30,  "max_holding": 32, "label": "15m", "hold_text": "~8 hours"},
+    "30m": {"resolution": "30m", "days": 45,  "max_holding": 28, "label": "30m", "hold_text": "~14 hours"},
+    "1h":  {"resolution": "1h",  "days": 90,  "max_holding": 24, "label": "1h",  "hold_text": "~24 hours"},
+    "4h":  {"resolution": "4h",  "days": 180, "max_holding": 18, "label": "4h",  "hold_text": "~3 days"},
+    "1D":  {"resolution": "1d",  "days": 300, "max_holding": 15, "label": "Daily", "hold_text": "~15 days"},
 }
 
 ASSETS = ["BTCUSD", "ETHUSD", "SOLUSD"]
 
-# -------------------- SESSION STATE --------------------
 if "tf" not in st.session_state:
     st.session_state.tf = "1h"
 if "symbol" not in st.session_state:
     st.session_state.symbol = "BTCUSD"
 
-# -------------------- DATA FUNCTIONS --------------------
-@st.cache_data(ttl=4, show_spinner=False)
-def fetch_ticker(symbol: str):
+# -------------------- DATA --------------------
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_ticker(symbol):
     try:
-        r = requests.get(f"{DELTA_BASE}/v2/tickers/{symbol}", timeout=4).json()
-        return r.get("result", {})
+        return requests.get(f"{DELTA_BASE}/v2/tickers/{symbol}", timeout=4).json().get("result", {})
     except Exception:
         return {}
 
 @st.cache_data(ttl=40, show_spinner=False)
-def fetch_candles(symbol: str, resolution: str, days: int):
+def fetch_candles(symbol, resolution, days):
     end = int(time.time())
     start = end - days * 86400
     try:
-        r = requests.get(
-            f"{DELTA_BASE}/v2/history/candles",
-            params={"resolution": resolution, "symbol": symbol, "start": start, "end": end},
-            timeout=12
-        ).json()
+        r = requests.get(f"{DELTA_BASE}/v2/history/candles",
+                         params={"resolution": resolution, "symbol": symbol, "start": start, "end": end},
+                         timeout=12).json()
         return list(reversed(r.get("result", [])))
     except Exception:
         return []
@@ -100,7 +85,7 @@ def run_model(close_t, high_t, low_t, vol_t, max_holding):
             y.append(1 if labels[i] == 1 else 0)
 
     if len(X) < 80:
-        return None, None, None
+        return None, None
 
     X = np.array(X)[:, WINNING_FEATURE_INDICES]
     y = np.array(y)
@@ -108,7 +93,7 @@ def run_model(close_t, high_t, low_t, vol_t, max_holding):
     model.fit(X, y)
     proba = float(model.predict_proba(np.array([build_features(ohlcv, len(close)-1)])[:, WINNING_FEATURE_INDICES])[0, 1])
     cur_vol = float(vol[-1]) if len(vol) and vol[-1] > 0 else float(np.std(np.diff(np.log(close[-20:]))))
-    return proba, cur_vol, model.feature_importances_.tolist()
+    return proba, cur_vol
 
 def score_pattern(inds, profile, is_top=True):
     score = 0.0
@@ -128,32 +113,33 @@ def score_pattern(inds, profile, is_top=True):
     score += ema_score * 0.20
     return round(score, 1)
 
-# -------------------- HEADER / ASSET SELECTOR --------------------
-st.markdown("### Signal.")
-st.caption(f"live · updated {datetime.now().strftime('%H:%M:%S')}")
+# -------------------- UI HEADER --------------------
+st.markdown("### Leverage Signal")
+st.caption(f"live · {datetime.now().strftime('%H:%M:%S')}")
 
-# Asset pills
-a1, a2, a3 = st.columns(3)
-for col, sym in zip([a1, a2, a3], ASSETS):
+# Asset selector
+cols = st.columns(len(ASSETS))
+for col, sym in zip(cols, ASSETS):
     with col:
-        if st.button(sym.replace("USD", ""), key=f"asset_{sym}", use_container_width=True):
+        if st.button(sym.replace("USD", ""), key=f"a_{sym}", use_container_width=True):
             st.session_state.symbol = sym
             st.rerun()
 
 symbol = st.session_state.symbol
-tf = st.session_state.tf
-tf_cfg = TIMEFRAMES[tf]
 
-# -------------------- TIMEFRAME PILLS (like reference) --------------------
+# Timeframe pills
 st.write("")
 tf_cols = st.columns(len(TIMEFRAMES))
 for col, (key, cfg) in zip(tf_cols, TIMEFRAMES.items()):
     with col:
-        if st.button(cfg["label"], key=f"tf_{key}", use_container_width=True):
+        if st.button(cfg["label"], key=f"t_{key}", use_container_width=True):
             st.session_state.tf = key
             st.rerun()
 
-# -------------------- FETCH DATA --------------------
+tf = st.session_state.tf
+tf_cfg = TIMEFRAMES[tf]
+
+# -------------------- LOAD DATA --------------------
 ticker = fetch_ticker(symbol)
 candles = fetch_candles(symbol, tf_cfg["resolution"], tf_cfg["days"])
 
@@ -176,71 +162,97 @@ rsi_val = rsi(close, 14)
 macd_line, macd_sig = macd(close)
 macd_hist = macd_line - macd_sig
 pve = (close[-1] - ema20) / ema20 * 100
+atr_val = atr(high, low, close)
 
 inds = {"rsi": rsi_val, "macd_hist": macd_hist, "price_vs_ema20": pve}
-
 top_score = score_pattern(inds, TOP_PROFILE, True)
 bottom_score = score_pattern(inds, BOTTOM_PROFILE, False)
 
-# Model
-proba, cur_vol, imp = run_model(tuple(close), tuple(high), tuple(low), tuple(volume), tf_cfg["max_holding"])
+proba, cur_vol = run_model(tuple(close), tuple(high), tuple(low), tuple(volume), tf_cfg["max_holding"])
 
-# Holt projection (like reference app)
-try:
-    fc = ensemble_forecast(close, steps=7)
-    proj_low = fc["lower_band"][-1]
-    proj_high = fc["upper_band"][-1]
-    proj_dir = "upward" if fc["forecast"][-1] > close[-1] else "downward"
-except Exception:
-    proj_low = proj_high = close[-1]
-    proj_dir = "sideways"
-
-# -------------------- MAIN DISPLAY --------------------
-st.markdown(f"## ${live_price:,.2f}")
-color = "green" if chg >= 0 else "red"
-st.markdown(f"<span style='color:{color}; font-size:1.1rem'>{chg:+.2f}% (24h)</span>", unsafe_allow_html=True)
-
-# Mini chart
-st.line_chart(pd.DataFrame({"Price": close[-80:]}), height=220)
-
-# Projection text (similar to reference)
-st.info(
-    f"7-bar statistical projection (Holt’s model): **{proj_dir}** trend, "
-    f"est. range ${proj_low:,.2f} – ${proj_high:,.2f}. "
-    f"This is a trend extrapolation, not a guarantee."
-)
-
-st.markdown("---")
-
-# Pattern + Model
-c1, c2, c3 = st.columns(3)
-c1.metric("Top Match", f"{top_score:.0f}%")
-c2.metric("Bottom Match", f"{bottom_score:.0f}%")
-c3.metric("Model Up Prob", f"{proba*100:.0f}%" if proba is not None else "N/A")
-
-if top_score >= 65 and top_score > bottom_score + 10:
-    st.warning("Setup resembles historical **TOPS**")
-elif bottom_score >= 65 and bottom_score > top_score + 10:
-    st.success("Setup resembles historical **BOTTOMS**")
+# -------------------- PREDICTION LOGIC --------------------
+if proba is None:
+    signal = "NO DATA"
+    signal_color = "gray"
+elif proba >= 0.62:
+    signal = "BUY"
+    signal_color = "green"
+elif proba <= 0.38:
+    signal = "SELL"
+    signal_color = "red"
 else:
-    st.caption("No strong top/bottom pattern active")
+    signal = "HOLD / NEUTRAL"
+    signal_color = "orange"
+
+# Entry / Exit / Stop levels
+entry = live_price
+if signal == "BUY":
+    take_profit = live_price * (1 + K_PROFIT * (cur_vol or 0.01))
+    stop_loss = live_price * (1 - K_STOP * (cur_vol or 0.01))
+elif signal == "SELL":
+    take_profit = live_price * (1 - K_PROFIT * (cur_vol or 0.01))
+    stop_loss = live_price * (1 + K_STOP * (cur_vol or 0.01))
+else:
+    take_profit = live_price * (1 + K_PROFIT * (cur_vol or 0.01))
+    stop_loss = live_price * (1 - K_STOP * (cur_vol or 0.01))
+
+holding_time = tf_cfg["hold_text"]
+
+# -------------------- DISPLAY --------------------
+st.markdown(f"## ${live_price:,.2f}")
+st.markdown(f"{'+' if chg >= 0 else ''}{chg:.2f}% (24h)")
+
+st.line_chart(pd.DataFrame({"Price": close[-90:]}), height=200)
 
 st.markdown("---")
 
-# Technical Indicators section (like reference)
-st.subheader("TECHNICAL INDICATORS")
+# ========== MAIN PREDICTION BLOCK ==========
+st.subheader("Prediction")
+
+# Big signal
+if signal == "BUY":
+    st.success(f"### {signal}")
+elif signal == "SELL":
+    st.error(f"### {signal}")
+else:
+    st.warning(f"### {signal}")
+
+if proba is not None:
+    st.write(f"Model confidence: **{proba*100:.1f}%** chance of upward barrier being hit first")
+
+# Key trade levels
+st.markdown("#### Trade Setup")
+col1, col2, col3 = st.columns(3)
+col1.metric("Entry", f"${entry:,.2f}")
+col2.metric("Take Profit", f"${take_profit:,.2f}")
+col3.metric("Stop Loss", f"${stop_loss:,.2f}")
+
+col4, col5 = st.columns(2)
+col4.metric("Holding Time", holding_time)
+col5.metric("Risk : Reward", f"1 : {K_PROFIT/K_STOP:.1f}")
+
+st.caption(f"Based on Triple Barrier (K={K_PROFIT}) + RandomForest on {tf_cfg['label']} timeframe")
+
+st.markdown("---")
+
+# Pattern detector
+st.subheader("Pattern Match")
+p1, p2 = st.columns(2)
+p1.metric("Top Match", f"{top_score:.0f}%")
+p2.metric("Bottom Match", f"{bottom_score:.0f}%")
+
+st.markdown("---")
+
+# Indicators
+st.subheader("Indicators")
 i1, i2, i3, i4 = st.columns(4)
 i1.metric("RSI (14)", f"{rsi_val:.1f}")
 i2.metric("MACD Hist", f"{macd_hist:.1f}")
 i3.metric("EMA 20", f"${ema20:,.0f}")
 i4.metric("SMA 200", f"${sma200:,.0f}")
 
-st.caption(f"Price vs EMA20: {pve:+.2f}%  |  Trend: {'Bullish' if live_price > sma200 else 'Bearish'} regime")
+st.caption(f"Price vs EMA20: {pve:+.2f}% · Regime: {'Bullish' if live_price > sma200 else 'Bearish'}")
 
-# Auto update every 12 seconds without full manual refresh
-time.sleep(0.1)  # small yield
-st_autorefresh = st.empty()
-# Simple auto-rerun
-if True:
-    time.sleep(12)
-    st.rerun()
+# Auto refresh
+time.sleep(12)
+st.rerun()
