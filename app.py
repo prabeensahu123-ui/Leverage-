@@ -1,3 +1,10 @@
+"""
+app.py - Delta Exchange Companion (Clean Version)
+
+Uses real OHLCV data + RandomForest trained with triple-barrier labels.
+No more synthetic/random price series.
+"""
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -6,234 +13,258 @@ import hmac
 import hashlib
 import json
 import time
+from datetime import datetime, timezone
+from sklearn.ensemble import RandomForestClassifier
 
-# Configure mobile screen layout
+from ml_features import build_features, FEATURE_NAMES
+from triple_barrier import triple_barrier_labels
+from features import atr
+
+# -------------------- CONFIG --------------------
 st.set_page_config(
-    page_title="Delta Pro Companion",
+    page_title="Leverage - BTC Predictor",
     layout="centered",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 st.markdown("""
     <style>
-    .main { padding: 0px; }
     .stButton button { width: 100%; border-radius: 8px; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("### ⚡ Delta Integrated Terminal (Pro Engine)")
+DELTA_BASE = "https://api.india.delta.exchange"
+WINNING_FEATURES = ["atr_pct", "price_vol_trend", "return_3d", "price_vs_ema20"]
+WINNING_FEATURE_INDICES = [FEATURE_NAMES.index(f) for f in WINNING_FEATURES]
+K_PROFIT = 2.0
+K_STOP = 2.0
+MAX_HOLDING = 24
 
-# --- SIDEBAR: SECURE API CREDENTIALS ---
+# -------------------- SIDEBAR --------------------
 with st.sidebar:
-    st.header("🔑 Delta API Credentials")
-    api_key_input = st.text_input("API Key", type="password")
-    api_secret_input = st.text_input("API Secret", type="password")
-    st.info("Credentials stay in session memory for order signing and are never saved anywhere.")
+    st.header("🔑 API Credentials")
+    api_key = st.text_input("API Key", type="password")
+    api_secret = st.text_input("API Secret", type="password")
+    st.info("Credentials are only kept in memory for this session.")
 
-# 1. Asset, Timeframe & Leverage Controls
-col_s1, col_s2, col_s3 = st.columns(3)
-with col_s1:
-    symbol_choice = st.selectbox("Asset", ["BTCUSD", "ETHUSD", "SOLUSD"])
-with col_s2:
-    timeframe = st.selectbox("Timeframe", ["1m", "5m", "15m", "30m", "45m", "1h", "4h"])
-with col_s3:
-    leverage = st.selectbox("Leverage", ["1x", "5x", "10x", "20x", "50x"])
+    st.header("⚙️ Settings")
+    symbol = st.selectbox("Symbol", ["BTCUSD", "ETHUSD", "SOLUSD"])
+    leverage = st.selectbox("Leverage", ["1x", "5x", "10x", "20x", "50x"], index=1)
+    paper_mode = st.checkbox("Paper Mode (Recommended)", value=True)
 
-# --- FETCH LIVE MARKET DATA & PRODUCT ID ---
-live_price = 77299.0
-price_change_24h = 0.0
-product_id = 27  # Default fallback for BTCUSD
+# -------------------- DATA FETCHING --------------------
+@st.cache_data(ttl=60)
+def fetch_candles(symbol: str, days: int = 90):
+    end = int(time.time())
+    start = end - days * 86400
+    url = f"{DELTA_BASE}/v2/history/candles"
+    params = {"resolution": "1h", "symbol": symbol, "start": start, "end": end}
+    try:
+        resp = requests.get(url, params=params, timeout=12)
+        resp.raise_for_status()
+        data = resp.json().get("result", [])
+        return list(reversed(data))
+    except Exception as e:
+        st.error(f"Failed to fetch candles: {e}")
+        return []
 
-try:
-    prod_res = requests.get("https://api.india.delta.exchange/v2/products", headers={"User-Agent": "Mozilla/5.0"}, timeout=3).json()
-    if "result" in prod_res:
-        for p in prod_res["result"]:
-            if p.get("symbol") == symbol_choice and p.get("contract_type") == "perpetual_futures":
-                product_id = p.get("id")
-                break
+@st.cache_data(ttl=30)
+def fetch_ticker(symbol: str):
+    try:
+        url = f"{DELTA_BASE}/v2/tickers/{symbol}"
+        res = requests.get(url, timeout=5).json()
+        if "result" in res:
+            return res["result"]
+    except Exception:
+        pass
+    return {}
 
-    url = f"https://api.india.delta.exchange/v2/tickers/{symbol_choice}"
-    res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3).json()
-    if "result" in res and res["result"]:
-        data = res["result"]
-        live_price = float(data.get("close", data.get("mark_price", 77299.0)))
-        price_change_24h = float(data.get("price_change_24h", 0.0)) * 100
-except Exception:
-    pass
+candles = fetch_candles(symbol)
+ticker = fetch_ticker(symbol)
 
-# --- ROBUST TECHNICAL ENGINE (ATR, EMA & RSI DYNAMICS) ---
-np.random.seed(int(live_price) % 1000)
-base_vol = 0.0015 if timeframe in ["1m", "5m"] else 0.005
-price_series = pd.Series(live_price * (1 + np.random.normal(0, base_vol, 60).cumsum()))
-price_series.iloc[-1] = live_price  # Anchor to live tick
+if not candles:
+    st.error("Could not load market data. Please try again later.")
+    st.stop()
 
-# 1. Moving Averages
-ema_fast = price_series.ewm(span=9, adjust=False).mean().iloc[-1]
-ema_slow = price_series.ewm(span=21, adjust=False).mean().iloc[-1]
+close = np.array([c["close"] for c in candles], dtype=float)
+high = np.array([c["high"] for c in candles], dtype=float)
+low = np.array([c["low"] for c in candles], dtype=float)
+volume = np.array([c["volume"] for c in candles], dtype=float)
+ohlcv = {
+    "open": np.array([c["open"] for c in candles], dtype=float),
+    "high": high,
+    "low": low,
+    "close": close,
+    "volume": volume,
+}
 
-# 2. RSI Calculation
-delta = price_series.diff()
-gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-rs = gain / loss
-rsi_series = 100 - (100 / (1 + rs))
-calculated_rsi = float(rsi_series.iloc[-1])
-if np.isnan(calculated_rsi):
-    calculated_rsi = 50.0
+live_price = float(ticker.get("close", ticker.get("mark_price", close[-1])))
+price_change_24h = float(ticker.get("price_change_24h", 0.0)) * 100
 
-# 3. Dynamic Volatility Buffer via Simulated ATR (Average True Range)
-atr_value = price_series.diff().abs().rolling(14).mean().iloc[-1]
-if np.isnan(atr_value) or atr_value == 0:
-    atr_value = live_price * 0.003
+# -------------------- MODEL --------------------
+def train_and_predict(ohlcv, close):
+    labels, valid, vol, _, _ = triple_barrier_labels(
+        close, K_PROFIT, K_STOP, MAX_HOLDING
+    )
 
-# Timeframe-based ATR Multiplier (Prevents stop-hunting wicks)
-if timeframe in ["1m", "5m"]:
-    sl_multiplier = 1.8
-    tp_multiplier = 2.5
-    engine_mode = "⚡ ATR Scalp Mode (Wick-Protected)"
-elif timeframe in ["15m", "30m", "45m"]:
-    sl_multiplier = 2.0
-    tp_multiplier = 3.0
-    engine_mode = "🎯 Intraday Trend Mode"
-else:
-    sl_multiplier = 2.5
-    tp_multiplier = 4.0
-    engine_mode = "🏛️ Macro Swing Mode"
+    X, y = [], []
+    min_history = 60
+    for i in range(min_history, len(close) - 1):
+        if valid[i] and labels[i] != 0:
+            feats = build_features(ohlcv, i)
+            X.append(feats)
+            y.append(1 if labels[i] == 1 else 0)
 
-# Trend & Momentum Confluence Check
-bullish_trend = ema_fast > ema_slow and calculated_rsi > 48
-bearish_trend = ema_fast < ema_slow and calculated_rsi < 52
+    if len(X) < 120:
+        return None, None, None
 
-# Volatility Filter: Detect market choppiness
-choppiness = abs(calculated_rsi - 50) < 3.0
+    X = np.array(X)[:, WINNING_FEATURE_INDICES]
+    y = np.array(y)
 
-if choppiness:
-    direction_bias = "NEUTRAL_CHOP"
-    bias_display = "RANGE / CHOP DETECTED ⚠️"
-    advice = "Market is compressing sideways. Avoid opening high-leverage orders until momentum breaks out."
-    tp_target = live_price + (atr_value * tp_multiplier)
-    sl_target = live_price - (atr_value * sl_multiplier)
-elif bullish_trend:
-    direction_bias = "LONG"
-    bias_display = "STRONG LONG SETUP 🟢"
-    advice = f"Fast EMA(9) > Slow EMA(21) with RSI at {calculated_rsi:.1f}. ATR stop loss padded against wicks."
-    tp_target = live_price + (atr_value * tp_multiplier)
-    sl_target = live_price - (atr_value * sl_multiplier)
-else:
-    direction_bias = "SHORT"
-    bias_display = "STRONG SHORT SETUP 🔴"
-    advice = f"Fast EMA(9) < Slow EMA(21) with RSI at {calculated_rsi:.1f}. ATR stop loss padded against wicks."
-    tp_target = live_price - (atr_value * tp_multiplier)
-    sl_target = live_price + (atr_value * sl_multiplier)
+    model = RandomForestClassifier(
+        n_estimators=150,
+        max_depth=5,
+        min_samples_leaf=10,
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X, y)
 
-# Display Header Metrics
+    current_feats = np.array([build_features(ohlcv, len(close) - 1)])[:, WINNING_FEATURE_INDICES]
+    proba = model.predict_proba(current_feats)[0, 1]
+
+    current_vol = vol[-1] if vol[-1] > 0 else np.std(np.diff(np.log(close[-20:])))
+    return proba, current_vol, model
+
+proba, current_vol, model = train_and_predict(ohlcv, close)
+
+# -------------------- UI --------------------
+st.title("⚡ Leverage - Bitcoin Signal Engine")
+
 m1, m2, m3 = st.columns(3)
 m1.metric("Live Price", f"${live_price:,.2f}", f"{price_change_24h:.2f}%")
-m2.metric("RSI (14)", f"{calculated_rsi:.1f}")
-m3.metric("ATR Volatility", f"${atr_value:,.2f}")
+m2.metric("Model Confidence (Up)", f"{proba*100:.1f}%" if proba is not None else "N/A")
+m3.metric("Current Volatility", f"{current_vol*100:.3f}%" if current_vol else "N/A")
 
 st.markdown("---")
 
-# --- STRUCTURAL TRAJECTORY CHART ---
-st.subheader(f"📈 {symbol_choice} Projection Map ({timeframe})")
-
-history_len = 16
-past_path = list(price_series.tail(history_len))
-
-future_len = 8
-if direction_bias == "LONG":
-    projected_path = np.linspace(live_price, tp_target, future_len)
-elif direction_bias == "SHORT":
-    projected_path = np.linspace(live_price, tp_target, future_len)
+if proba is None:
+    st.warning("Not enough data yet to train a reliable model.")
 else:
-    projected_path = np.linspace(live_price, live_price, future_len)
+    if proba > 0.60:
+        bias = "LONG 🟢"
+        advice = f"Model assigns {proba*100:.1f}% probability that the upper barrier will be hit first."
+        direction = 1
+    elif proba < 0.40:
+        bias = "SHORT 🔴"
+        advice = f"Model assigns {(1-proba)*100:.1f}% probability that the lower barrier will be hit first."
+        direction = -1
+    else:
+        bias = "NEUTRAL / NO TRADE ⚪"
+        advice = "Confidence is too low. Better to stay flat."
+        direction = 0
 
-chart_df = pd.DataFrame({
-    "Historical Price": past_path + [None] * future_len,
-    f"ATR Target Trajectory ({timeframe})": [None] * history_len + list(projected_path)
-})
-st.line_chart(chart_df, height=200)
+    st.subheader(f"Signal: {bias}")
+    st.write(advice)
 
+    # Dynamic barriers
+    upper = live_price * (1 + K_PROFIT * current_vol)
+    lower = live_price * (1 - K_STOP * current_vol)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Entry", f"${live_price:,.2f}")
+    c2.metric("Take Profit (Upper)", f"${upper:,.2f}")
+    c3.metric("Stop Loss (Lower)", f"${lower:,.2f}")
+
+    st.markdown("---")
+
+    # Simple chart of recent closes
+    st.subheader("Recent Price Action (1h)")
+    chart_df = pd.DataFrame({"Close": close[-80:]})
+    st.line_chart(chart_df, height=250)
+
+# -------------------- ORDER SECTION --------------------
 st.markdown("---")
+st.subheader("🔒 Order Execution")
 
-# --- ACTIONABLE TRADE SETUP & TARGETS ---
-st.subheader("🎯 Trade Plan & Risk Matrix")
-st.info(f"**Engine Status:** {engine_mode} | **EMA(9):** ${ema_fast:,.1f} | **EMA(21):** ${ema_slow:,.1f}")
+if paper_mode:
+    st.info("Paper Mode is ON. No real orders will be sent.")
+else:
+    st.warning("Live Mode is active. Real money can be used.")
 
-st.markdown(f"**Market Signal:** {bias_display}")
-st.write(f"💡 *{advice}*")
+col1, col2 = st.columns(2)
 
-col_t1, col_t2 = st.columns(2)
-col_t1.metric("Entry Price", f"${live_price:,.2f}")
-col_t2.metric("Risk-Reward Ratio", f"1:{tp_multiplier / sl_multiplier:.1f}")
+with col1:
+    if st.button("🟢 Open LONG", disabled=(proba is None or proba < 0.55)):
+        st.session_state["pending"] = "buy"
 
-col_t3, col_t4 = st.columns(2)
-col_t3.metric("Dynamic Take Profit (TP)", f"${tp_target:,.2f}")
-col_t4.metric("Dynamic Stop Loss (SL)", f"${sl_target:,.2f}")
+with col2:
+    if st.button("🔴 Open SHORT", disabled=(proba is None or proba > 0.45)):
+        st.session_state["pending"] = "sell"
 
-st.markdown("---")
+if "pending" in st.session_state and st.session_state["pending"]:
+    side = st.session_state["pending"]
+    st.warning(f"Confirm **{side.upper()}** market order on **{symbol}** with **{leverage}**?")
 
-# --- SAFETY CONFIRMATION & LIVE EXECUTION ---
-st.subheader("🔒 Secure Order Trigger")
-
-col_b1, col_b2 = st.columns(2)
-if col_b1.button("🟢 OPEN LONG"):
-    st.session_state["pending_order"] = "buy"
-if col_b2.button("🔴 OPEN SHORT"):
-    st.session_state["pending_order"] = "sell"
-
-if "pending_order" in st.session_state and st.session_state["pending_order"]:
-    pending = st.session_state["pending_order"].upper()
-    st.warning(f"⚠️ **CONFIRMATION REQUIRED:** Place live **{pending}** market order on **{symbol_choice}** using **{leverage}** leverage?")
-    
-    c_yes, c_no = st.columns(2)
-    if c_yes.button("✅ Confirm & Send to Delta"):
-        if not api_key_input or not api_secret_input:
-            st.error("Please enter your Delta API Key and Secret in the sidebar first!")
+    cy, cn = st.columns(2)
+    if cy.button("✅ Confirm"):
+        if paper_mode:
+            st.success(f"Paper {side.upper()} order recorded at ${live_price:,.2f}")
         else:
-            try:
-                base_url = "https://api.india.delta.exchange"
-                path = "/v2/orders"
-                method = "POST"
-                timestamp = str(int(time.time() * 1000))
-                
-                payload = {
-                    "product_id": int(product_id),
-                    "size": 1,
-                    "side": st.session_state["pending_order"],
-                    "order_type": "market_order"
-                }
-                payload_str = json.dumps(payload, separators=(',', ':'))
-                
-                # HMAC-SHA256 Signature generation
-                signature_data = method + timestamp + path + payload_str
-                signature = hmac.new(
-                    api_secret_input.encode('utf-8'),
-                    signature_data.encode('utf-8'),
-                    hashlib.sha256
-                ).hexdigest()
+            if not api_key or not api_secret:
+                st.error("Please enter API credentials in the sidebar.")
+            else:
+                # Place real order
+                try:
+                    # Get product_id
+                    prod_res = requests.get(f"{DELTA_BASE}/v2/products", timeout=5).json()
+                    product_id = None
+                    for p in prod_res.get("result", []):
+                        if p.get("symbol") == symbol and p.get("contract_type") == "perpetual_futures":
+                            product_id = p["id"]
+                            break
 
-                headers = {
-                    "api-key": api_key_input,
-                    "timestamp": timestamp,
-                    "signature": signature,
-                    "Content-Type": "application/json",
-                    "User-Agent": "DeltaCompanion/1.0"
-                }
+                    if not product_id:
+                        st.error("Could not find product_id")
+                    else:
+                        path = "/v2/orders"
+                        method = "POST"
+                        timestamp = str(int(time.time() * 1000))
+                        payload = {
+                            "product_id": int(product_id),
+                            "size": 1,
+                            "side": side,
+                            "order_type": "market_order",
+                        }
+                        payload_str = json.dumps(payload, separators=(',', ':'))
+                        signature_data = method + timestamp + path + payload_str
+                        signature = hmac.new(
+                            api_secret.encode(),
+                            signature_data.encode(),
+                            hashlib.sha256
+                        ).hexdigest()
 
-                response = requests.post(base_url + path, data=payload_str, headers=headers, timeout=5)
-                res_json = response.json()
+                        headers = {
+                            "api-key": api_key,
+                            "timestamp": timestamp,
+                            "signature": signature,
+                            "Content-Type": "application/json",
+                            "User-Agent": "LeverageBot/2.0",
+                        }
 
-                if res_json.get("success"):
-                    st.success(f"🚀 Order routed successfully to Delta! Order ID: {res_json.get('result', {}).get('id')}")
-                else:
-                    st.error(f"Delta API Error: {res_json.get('error', 'Check API permissions or keys')}")
-            
-            except Exception as e:
-                st.error(f"Connection failed: {e}")
-                
-        st.session_state["pending_order"] = None
+                        resp = requests.post(DELTA_BASE + path, data=payload_str, headers=headers, timeout=8)
+                        res = resp.json()
+                        if res.get("success"):
+                            st.success(f"Order placed! ID: {res.get('result', {}).get('id')}")
+                        else:
+                            st.error(f"API Error: {res.get('error')}")
+                except Exception as e:
+                    st.error(f"Order failed: {e}")
 
-    if c_no.button("❌ Cancel"):
-        st.info("Order cancelled safely.")
-        st.session_state["pending_order"] = None
+        st.session_state["pending"] = None
+
+    if cn.button("❌ Cancel"):
+        st.session_state["pending"] = None
+        st.info("Cancelled.")
+
+st.caption("Model uses RandomForest + Triple Barrier labeling | Data: Delta Exchange 1h candles")
