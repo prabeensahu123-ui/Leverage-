@@ -2,7 +2,7 @@
 app.py - Delta Exchange Companion (Clean Version)
 
 Uses real OHLCV data + RandomForest trained with triple-barrier labels.
-Now includes SMA200 + MACD Histogram + RSI in the feature set.
+Includes SMA200 + MACD Histogram + RSI + Feature Importance display.
 """
 
 import streamlit as st
@@ -137,7 +137,7 @@ def train_and_predict(ohlcv, close):
             y.append(1 if labels[i] == 1 else 0)
 
     if len(X) < 120:
-        return None, None, None
+        return None, None, None, None
 
     X = np.array(X)[:, WINNING_FEATURE_INDICES]
     y = np.array(y)
@@ -155,9 +155,17 @@ def train_and_predict(ohlcv, close):
     proba = model.predict_proba(current_feats)[0, 1]
 
     current_vol = vol[-1] if vol[-1] > 0 else np.std(np.diff(np.log(close[-20:])))
-    return proba, current_vol, model
 
-proba, current_vol, model = train_and_predict(ohlcv, close)
+    # Feature importance
+    importances = model.feature_importances_
+    importance_df = pd.DataFrame({
+        "Feature": WINNING_FEATURES,
+        "Importance": importances
+    }).sort_values("Importance", ascending=False).reset_index(drop=True)
+
+    return proba, current_vol, model, importance_df
+
+proba, current_vol, model, importance_df = train_and_predict(ohlcv, close)
 
 # -------------------- UI --------------------
 st.title("⚡ Leverage - Bitcoin Signal Engine")
@@ -189,15 +197,12 @@ else:
     if proba > 0.60:
         bias = "LONG 🟢"
         advice = f"Model assigns {proba*100:.1f}% probability that the upper barrier will be hit first."
-        direction = 1
     elif proba < 0.40:
         bias = "SHORT 🔴"
         advice = f"Model assigns {(1-proba)*100:.1f}% probability that the lower barrier will be hit first."
-        direction = -1
     else:
         bias = "NEUTRAL / NO TRADE ⚪"
         advice = "Confidence is too low. Better to stay flat."
-        direction = 0
 
     st.subheader(f"Signal: {bias}")
     st.write(advice)
@@ -210,6 +215,24 @@ else:
     c1.metric("Entry", f"${live_price:,.2f}")
     c2.metric("Take Profit (Upper)", f"${upper:,.2f}")
     c3.metric("Stop Loss (Lower)", f"${lower:,.2f}")
+
+    st.markdown("---")
+
+    # -------------------- FEATURE IMPORTANCE --------------------
+    st.subheader("🔍 Feature Importance")
+    st.caption("How much each feature contributed to the current model decision")
+
+    # Bar chart
+    chart_data = importance_df.set_index("Feature")
+    st.bar_chart(chart_data, height=280)
+
+    # Table view
+    with st.expander("View detailed importance values"):
+        st.dataframe(
+            importance_df.style.format({"Importance": "{:.3f}"}),
+            use_container_width=True,
+            hide_index=True
+        )
 
     st.markdown("---")
 
@@ -282,7 +305,7 @@ if "pending" in st.session_state and st.session_state["pending"]:
                             "timestamp": timestamp,
                             "signature": signature,
                             "Content-Type": "application/json",
-                            "User-Agent": "LeverageBot/2.1",
+                            "User-Agent": "LeverageBot/2.2",
                         }
 
                         resp = requests.post(DELTA_BASE + path, data=payload_str, headers=headers, timeout=8)
