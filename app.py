@@ -2,7 +2,7 @@
 app.py - Delta Exchange Companion (Clean Version)
 
 Uses real OHLCV data + RandomForest trained with triple-barrier labels.
-No more synthetic/random price series.
+Now includes SMA200 + MACD Histogram + RSI in the feature set.
 """
 
 import streamlit as st
@@ -16,9 +16,10 @@ import time
 from datetime import datetime, timezone
 from sklearn.ensemble import RandomForestClassifier
 
-from ml_features import build_features, FEATURE_NAMES
+from ml_features import build_features, FEATURE_NAMES, WINNING_FEATURES
 from triple_barrier import triple_barrier_labels
 from features import atr
+from signal_engine import sma, ema, rsi, macd
 
 # -------------------- CONFIG --------------------
 st.set_page_config(
@@ -34,7 +35,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DELTA_BASE = "https://api.india.delta.exchange"
-WINNING_FEATURES = ["atr_pct", "price_vol_trend", "return_3d", "price_vs_ema20"]
 WINNING_FEATURE_INDICES = [FEATURE_NAMES.index(f) for f in WINNING_FEATURES]
 K_PROFIT = 2.0
 K_STOP = 2.0
@@ -54,13 +54,14 @@ with st.sidebar:
 
 # -------------------- DATA FETCHING --------------------
 @st.cache_data(ttl=60)
-def fetch_candles(symbol: str, days: int = 90):
+def fetch_candles(symbol: str, days: int = 120):
+    """Fetch more history so SMA200 is meaningful."""
     end = int(time.time())
     start = end - days * 86400
     url = f"{DELTA_BASE}/v2/history/candles"
     params = {"resolution": "1h", "symbol": symbol, "start": start, "end": end}
     try:
-        resp = requests.get(url, params=params, timeout=12)
+        resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json().get("result", [])
         return list(reversed(data))
@@ -100,6 +101,26 @@ ohlcv = {
 
 live_price = float(ticker.get("close", ticker.get("mark_price", close[-1])))
 price_change_24h = float(ticker.get("price_change_24h", 0.0)) * 100
+
+# -------------------- HELPER INDICATORS FOR DISPLAY --------------------
+def get_key_indicators(close):
+    price = close[-1]
+    sma20_val = sma(close, 20) if len(close) >= 20 else price
+    ema20_val = ema(close, 20) if len(close) >= 20 else price
+    sma200_val = sma(close, 200) if len(close) >= 200 else sma(close, min(len(close), 100))
+    rsi_val = rsi(close, 14)
+    macd_line, macd_sig = macd(close)
+    macd_hist = macd_line - macd_sig
+    return {
+        "sma20": sma20_val,
+        "ema20": ema20_val,
+        "sma200": sma200_val,
+        "rsi": rsi_val,
+        "macd_hist": macd_hist,
+        "price_vs_sma200": (price - sma200_val) / sma200_val if sma200_val else 0,
+    }
+
+indicators = get_key_indicators(close)
 
 # -------------------- MODEL --------------------
 def train_and_predict(ohlcv, close):
@@ -148,6 +169,20 @@ m3.metric("Current Volatility", f"{current_vol*100:.3f}%" if current_vol else "N
 
 st.markdown("---")
 
+# Technical Snapshot
+st.subheader("📊 Key Technicals")
+t1, t2, t3, t4 = st.columns(4)
+t1.metric("RSI (14)", f"{indicators['rsi']:.1f}")
+t2.metric("MACD Hist", f"{indicators['macd_hist']:.1f}")
+t3.metric("EMA 20", f"${indicators['ema20']:,.0f}")
+t4.metric("SMA 200", f"${indicators['sma200']:,.0f}")
+
+# Trend context
+trend_text = "Above SMA200 (Bullish Regime)" if live_price > indicators["sma200"] else "Below SMA200 (Bearish Regime)"
+st.caption(f"Trend Context: {trend_text}")
+
+st.markdown("---")
+
 if proba is None:
     st.warning("Not enough data yet to train a reliable model.")
 else:
@@ -180,7 +215,7 @@ else:
 
     # Simple chart of recent closes
     st.subheader("Recent Price Action (1h)")
-    chart_df = pd.DataFrame({"Close": close[-80:]})
+    chart_df = pd.DataFrame({"Close": close[-100:]})
     st.line_chart(chart_df, height=250)
 
 # -------------------- ORDER SECTION --------------------
@@ -214,9 +249,7 @@ if "pending" in st.session_state and st.session_state["pending"]:
             if not api_key or not api_secret:
                 st.error("Please enter API credentials in the sidebar.")
             else:
-                # Place real order
                 try:
-                    # Get product_id
                     prod_res = requests.get(f"{DELTA_BASE}/v2/products", timeout=5).json()
                     product_id = None
                     for p in prod_res.get("result", []):
@@ -249,7 +282,7 @@ if "pending" in st.session_state and st.session_state["pending"]:
                             "timestamp": timestamp,
                             "signature": signature,
                             "Content-Type": "application/json",
-                            "User-Agent": "LeverageBot/2.0",
+                            "User-Agent": "LeverageBot/2.1",
                         }
 
                         resp = requests.post(DELTA_BASE + path, data=payload_str, headers=headers, timeout=8)
@@ -267,4 +300,4 @@ if "pending" in st.session_state and st.session_state["pending"]:
         st.session_state["pending"] = None
         st.info("Cancelled.")
 
-st.caption("Model uses RandomForest + Triple Barrier labeling | Data: Delta Exchange 1h candles")
+st.caption("Features: ATR% • Price-Vol Trend • Return 3d • EMA20 • SMA200 • MACD Hist • RSI | Triple Barrier Labels")
