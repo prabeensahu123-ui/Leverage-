@@ -1,19 +1,15 @@
 """
 paper_trade_step.py - Paper trading runner for the triple-barrier model.
 
+Updated to use the expanded feature set (SMA200 + MACD Histogram + RSI).
+
 Run this periodically (e.g. once per hour). Each run:
   1. Fetches the latest hourly BTC data from Delta Exchange
-  2. Checks any OPEN paper position against new prices (did it hit a
-     barrier? time out?) and logs the result if resolved
-  3. If no position is open, retrains the model on all available
-     history and checks if the current bar is a confident signal
-  4. If confident, opens a new paper position (no real money, just logged)
+  2. Checks any OPEN paper position against new prices
+  3. If no position is open, retrains the model and checks for a confident signal
+  4. Opens a new paper position if confidence is high enough
 
-NO REAL ORDERS ARE EVER PLACED. This only reads market data and writes
-to local log files - completely safe to run repeatedly.
-
-Usage:
-    python paper_trade_step.py
+NO REAL ORDERS ARE EVER PLACED.
 """
 
 import json
@@ -25,30 +21,25 @@ import os
 from datetime import datetime, timezone
 from sklearn.ensemble import RandomForestClassifier
 
-from ml_features import build_features, FEATURE_NAMES
+from ml_features import build_features, FEATURE_NAMES, WINNING_FEATURES
 from triple_barrier import triple_barrier_labels
 
 DELTA_BASE_URL = "https://api.india.delta.exchange"
 SYMBOL = "BTCUSD"
-K_PROFIT = 2.0   # symmetric barriers - the validated, honest version
+K_PROFIT = 2.0
 K_STOP = 2.0
 MAX_HOLDING_BARS = 24
 FEE_PCT = 0.0005
 POSITION_SIZE_PCT = 0.10
 STARTING_EQUITY = 10_000.0
 
-# The validated 4-feature subset - found via combinatorial search, verified
-# on held-out data, stable across 10 random seeds, and survives funding costs.
-# This replaced the original 13-feature version after proper validation.
-WINNING_FEATURES = ["atr_pct", "price_vol_trend", "return_3d", "price_vs_ema20"]
 WINNING_FEATURE_INDICES = [FEATURE_NAMES.index(f) for f in WINNING_FEATURES]
 
-HISTORY_FILE = "paper_trade_history.csv"       # rolling OHLCV data
-STATE_FILE = "paper_trade_state.json"          # open position + equity tracking
-LOG_FILE = "paper_trade_log.csv"               # completed trades log
+STATE_FILE = "paper_trade_state.json"
+LOG_FILE = "paper_trade_log.csv"
 
 
-def fetch_latest_candles(days=90):
+def fetch_latest_candles(days=120):
     end = int(time.time())
     start = end - days * 86400
     url = f"{DELTA_BASE_URL}/v2/history/candles"
@@ -83,6 +74,7 @@ def log_trade(row):
 
 def main():
     print(f"[{datetime.now(timezone.utc).isoformat()}] Paper trading step starting...")
+    print(f"Using features: {WINNING_FEATURES}")
 
     candles = fetch_latest_candles()
     close = np.array([c["close"] for c in candles])
@@ -95,20 +87,16 @@ def main():
 
     state = load_state()
 
-    # Catch up on every hourly bar since the last time we ran, not just
-    # the latest one - this makes the script safe to run at ANY cadence
-    # (hourly, daily, whenever you remember), since it processes each
-    # missed hour in order rather than skipping ahead.
     last_processed = state.get("last_processed_time")
     if last_processed is None:
-        bars_to_process = [len(times) - 1]  # first ever run - just check current bar
+        bars_to_process = [len(times) - 1]
     else:
         bars_to_process = [i for i in range(len(times)) if times[i] > last_processed]
         if not bars_to_process:
             print("No new bars since last run - nothing to do yet.")
             return
 
-    print(f"Processing {len(bars_to_process)} new hourly bar(s) since last run...")
+    print(f"Processing {len(bars_to_process)} new hourly bar(s)...")
 
     for bar_idx in bars_to_process:
         current_price = close[bar_idx]
@@ -124,7 +112,6 @@ def main():
 def _process_bar(state, ohlcv, close, bar_idx, current_price, current_time):
     print(f"\n--- Bar: {datetime.fromtimestamp(current_time, tz=timezone.utc)} | Price: {current_price:.2f} ---")
 
-    # --- Step 1: check if we have an open position, and if it resolved ---
     if state["open_position"] is not None:
         pos = state["open_position"]
         entry_price = pos["entry_price"]
@@ -159,14 +146,13 @@ def _process_bar(state, ohlcv, close, bar_idx, current_price, current_time):
             state["open_position"]["bars_open"] = bars_open
             print(f"Position still open: direction={direction} entry={entry_price:.2f} "
                   f"bars_open={bars_open}/{MAX_HOLDING_BARS}")
-        return  # don't open a new signal on the same bar we just checked/closed one
+        return
 
-    # --- Step 2: no open position - check for a new signal, using ONLY
-    # data available up through this bar (no lookahead into later bars) ---
+    # No open position → look for new signal
     ohlcv_so_far = {k: v[:bar_idx + 1] for k, v in ohlcv.items()}
     close_so_far = close[:bar_idx + 1]
 
-    labels, valid, vol, exit_prices, exit_indices = triple_barrier_labels(
+    labels, valid, vol, _, _ = triple_barrier_labels(
         close_so_far, K_PROFIT, K_STOP, MAX_HOLDING_BARS
     )
     X, y = [], []
@@ -177,12 +163,14 @@ def _process_bar(state, ohlcv, close, bar_idx, current_price, current_time):
             y.append(1 if labels[i] == 1 else 0)
 
     if len(X) < 100:
-        print("Not enough training data yet - skipping signal generation this run.")
+        print("Not enough training data yet - skipping signal generation.")
         return
 
     X, y = np.array(X), np.array(y)
-    X = X[:, WINNING_FEATURE_INDICES]  # use only the validated 4-feature subset
-    model = RandomForestClassifier(n_estimators=150, max_depth=5, random_state=42, min_samples_leaf=10)
+    X = X[:, WINNING_FEATURE_INDICES]
+    model = RandomForestClassifier(
+        n_estimators=150, max_depth=5, random_state=42, min_samples_leaf=10
+    )
     model.fit(X, y)
 
     current_features = np.array([build_features(ohlcv_so_far, bar_idx)])[:, WINNING_FEATURE_INDICES]
@@ -190,8 +178,8 @@ def _process_bar(state, ohlcv, close, bar_idx, current_price, current_time):
 
     print(f"Model confidence (prob of upward barrier hit first): {prob:.3f}")
 
-    if prob > 0.6 or prob < 0.4:
-        direction = 1 if prob > 0.6 else -1
+    if prob > 0.60 or prob < 0.40:
+        direction = 1 if prob > 0.60 else -1
         current_vol = vol[bar_idx] if vol[bar_idx] > 0 else np.std(np.diff(np.log(close_so_far[-20:])))
         upper_barrier = current_price * (1 + K_PROFIT * current_vol)
         lower_barrier = current_price * (1 - K_STOP * current_vol)
