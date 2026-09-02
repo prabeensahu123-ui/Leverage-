@@ -1,6 +1,6 @@
 """
 app.py - Leverage Signal Engine
-Multi-timeframe prediction table with color coding
+Multi-timeframe prediction table with color coding (fixed)
 """
 
 import streamlit as st
@@ -99,34 +99,6 @@ def get_signal(proba):
     else:
         return "HOLD", max(proba, 1 - proba) * 100
 
-def style_table(df):
-    def color_signal(val):
-        if val == "BUY":
-            return "background-color: #16a34a; color: white; font-weight: bold; text-align: center"
-        if val == "SELL":
-            return "background-color: #dc2626; color: white; font-weight: bold; text-align: center"
-        if val == "HOLD":
-            return "background-color: #ea580c; color: white; font-weight: bold; text-align: center"
-        return "text-align: center"
-
-    def color_conf(val):
-        try:
-            v = float(val)
-        except Exception:
-            return "text-align: center"
-        if v >= 70:
-            return "background-color: #16a34a; color: white; text-align: center"
-        if v >= 60:
-            return "background-color: #4ade80; color: black; text-align: center"
-        if v >= 50:
-            return "background-color: #fdba74; color: black; text-align: center"
-        return "background-color: #fca5a5; color: black; text-align: center"
-
-    return (df.style
-            .applymap(color_signal, subset=["Signal"])
-            .applymap(color_conf, subset=["Confidence"])
-            .set_properties(**{"text-align": "center"}))
-
 # -------------------- HEADER --------------------
 st.markdown("### Leverage Signal")
 st.caption(f"Multi-Timeframe View · {datetime.now().strftime('%H:%M:%S')}")
@@ -205,12 +177,54 @@ status.empty()
 progress.empty()
 
 df = pd.DataFrame(rows)
-st.dataframe(style_table(df), use_container_width=True, hide_index=True)
 
-st.caption("🟢 Strong Buy (≥70) · Light Green (60-69) · 🟠 Hold (50-59) · 🔴 Low / Sell side")
+# Color coding using HTML (more reliable across pandas versions)
+def make_colored_table(df):
+    html = "<table style='width:100%; border-collapse: collapse; font-size: 0.9rem;'>"
+    html += "<thead><tr style='background:#1e293b; color:white;'>"
+    for col in df.columns:
+        html += f"<th style='padding:8px; text-align:center; border:1px solid #334155;'>{col}</th>"
+    html += "</tr></thead><tbody>"
+
+    for _, row in df.iterrows():
+        html += "<tr>"
+        for col in df.columns:
+            val = row[col]
+            style = "padding:8px; text-align:center; border:1px solid #334155;"
+
+            if col == "Signal":
+                if val == "BUY":
+                    style += "background-color:#16a34a; color:white; font-weight:bold;"
+                elif val == "SELL":
+                    style += "background-color:#dc2626; color:white; font-weight:bold;"
+                elif val == "HOLD":
+                    style += "background-color:#ea580c; color:white; font-weight:bold;"
+
+            elif col == "Confidence":
+                try:
+                    v = float(val)
+                    if v >= 70:
+                        style += "background-color:#16a34a; color:white;"
+                    elif v >= 60:
+                        style += "background-color:#4ade80; color:black;"
+                    elif v >= 50:
+                        style += "background-color:#fdba74; color:black;"
+                    else:
+                        style += "background-color:#fca5a5; color:black;"
+                except Exception:
+                    pass
+
+            html += f"<td style='{style}'>{val}</td>"
+        html += "</tr>"
+    html += "</tbody></table>"
+    return html
+
+st.markdown(make_colored_table(df), unsafe_allow_html=True)
+
+st.caption("🟢 Strong (≥70) · Light Green (60-69) · 🟠 Hold (50-59) · 🔴 Low confidence / Sell")
 
 st.markdown("---")
-st.caption("Delta Exchange data · RandomForest + Triple Barrier · Auto refresh ~18s")
+st.caption("Delta Exchange · RandomForest + Triple Barrier · Auto refresh ~20s")
 
-time.sleep(18)
+time.sleep(20)
 st.rerun()
