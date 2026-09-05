@@ -1,6 +1,6 @@
 """
 app.py - Leverage Signal Engine
-Balanced 3-class model + Multi-timeframe table + Paper Trading Dashboard
+Balanced model + Multi-TF table + Algo Bot Dashboard
 """
 
 import streamlit as st
@@ -28,8 +28,10 @@ st.markdown("""
 DELTA_BASE = "https://api.india.delta.exchange"
 WINNING_FEATURE_INDICES = [FEATURE_NAMES.index(f) for f in WINNING_FEATURES]
 K_PROFIT, K_STOP = 2.0, 2.0
-TRADE_LOG_FILE = "paper_trades.csv"
-STATE_FILE = "paper_state.json"
+
+# Support both old and new paper trading locations
+STATE_FILES = ["algo_bot/state.json", "paper_state.json"]
+TRADE_FILES = ["algo_bot/trades.csv", "paper_trades.csv"]
 
 TIMEFRAMES = {
     "15m": {"resolution": "15m", "days": 30,  "max_holding": 32, "label": "15m",  "hold": "~8h"},
@@ -93,14 +95,13 @@ def run_balanced_model(close_t, high_t, low_t, vol_t, max_holding):
     )
     model.fit(X, y)
 
-    current_feats = np.array([build_features(ohlcv, len(close) - 1)])[:, WINNING_FEATURE_INDICES]
+    current_feats = np.array([build_features(ohlcv, len(close)-1)])[:, WINNING_FEATURE_INDICES]
     proba = model.predict_proba(current_feats)[0]
     classes = list(model.classes_)
 
     buy_proba = proba[classes.index(1)] if 1 in classes else 0.0
     sell_proba = proba[classes.index(-1)] if -1 in classes else 0.0
     hold_proba = proba[classes.index(0)] if 0 in classes else 0.0
-
     cur_vol = float(vol[-1]) if len(vol) and vol[-1] > 0 else float(np.std(np.diff(np.log(close[-15:]))))
     return buy_proba, sell_proba, hold_proba, cur_vol
 
@@ -117,21 +118,23 @@ def decide_signal(buy_p, sell_p, hold_p):
         return "SELL", sell_p * 100
     return "HOLD", max(buy_p, sell_p, hold_p) * 100
 
-def load_paper_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {"open_trades": {}}
+def load_bot_state():
+    for path in STATE_FILES:
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    return json.load(f)
+            except Exception:
+                pass
     return {"open_trades": {}}
 
-def load_paper_trades():
-    if os.path.exists(TRADE_LOG_FILE):
-        try:
-            return pd.read_csv(TRADE_LOG_FILE)
-        except Exception:
-            return pd.DataFrame()
+def load_bot_trades():
+    for path in TRADE_FILES:
+        if os.path.exists(path):
+            try:
+                return pd.read_csv(path)
+            except Exception:
+                pass
     return pd.DataFrame()
 
 # -------------------- HEADER --------------------
@@ -183,7 +186,6 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
     )
     signal, conf = decide_signal(buy_p, sell_p, hold_p)
 
-    entry = live_price
     vol = cur_vol or 0.01
     if signal == "BUY":
         tp = live_price * (1 + K_PROFIT * vol)
@@ -201,7 +203,7 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
         "Confidence": f"{conf:.0f}" if buy_p is not None else "-",
         "BUY %": f"{buy_p*100:.0f}" if buy_p is not None else "-",
         "SELL %": f"{sell_p*100:.0f}" if sell_p is not None else "-",
-        "Entry": f"${entry:,.0f}",
+        "Entry": f"${live_price:,.0f}",
         "Take Profit": f"${tp:,.0f}",
         "Stop Loss": f"${sl:,.0f}",
         "Hold": cfg["hold"]
@@ -225,12 +227,9 @@ def make_colored_table(df):
             val = row[col]
             style = "padding:7px; text-align:center; border:1px solid #334155;"
             if col == "Signal":
-                if val == "BUY":
-                    style += "background-color:#16a34a; color:white; font-weight:bold;"
-                elif val == "SELL":
-                    style += "background-color:#dc2626; color:white; font-weight:bold;"
-                elif val == "HOLD":
-                    style += "background-color:#ea580c; color:white; font-weight:bold;"
+                if val == "BUY": style += "background-color:#16a34a; color:white; font-weight:bold;"
+                elif val == "SELL": style += "background-color:#dc2626; color:white; font-weight:bold;"
+                elif val == "HOLD": style += "background-color:#ea580c; color:white; font-weight:bold;"
             elif col == "Confidence":
                 try:
                     v = float(val)
@@ -247,16 +246,15 @@ def make_colored_table(df):
 st.markdown(make_colored_table(df), unsafe_allow_html=True)
 st.caption("🟢 BUY · 🔴 SELL · 🟠 HOLD | Balanced 3-class model")
 
-# ==================== PAPER TRADING DASHBOARD ====================
+# ==================== ALGO BOT DASHBOARD ====================
 st.markdown("---")
-st.subheader("Paper Trading Dashboard")
-st.caption("Max 4 trades/day (15m · 1h · 4h · Daily) · 1 open trade per timeframe")
+st.subheader("Algo Bot Dashboard")
+st.caption("Standalone bot · Max 4 trades/day · Telegram alerts supported")
 
-state = load_paper_state()
+state = load_bot_state()
 open_trades = state.get("open_trades", {})
-trades_df = load_paper_trades()
+trades_df = load_bot_trades()
 
-# Open Trades
 st.markdown("#### Currently Open Trades")
 if open_trades:
     open_rows = []
@@ -268,14 +266,13 @@ if open_trades:
             "TP": f"${t.get('take_profit', 0):,.0f}",
             "SL": f"${t.get('stop_loss', 0):,.0f}",
             "Confidence": f"{t.get('confidence', 0)*100:.0f}%",
-            "Bars Held": t.get("bars_held", 0)
+            "Bars": t.get("bars_held", 0)
         })
     st.dataframe(pd.DataFrame(open_rows), use_container_width=True, hide_index=True)
 else:
-    st.info("No open paper trades right now.")
+    st.info("No open trades. Start the bot with: `python -m algo_bot.bot start`")
 
-# Performance Summary
-st.markdown("#### Performance Summary")
+st.markdown("#### Performance")
 if trades_df is not None and not trades_df.empty:
     total = len(trades_df)
     winrate = trades_df["win"].mean() * 100 if "win" in trades_df.columns else 0
@@ -283,13 +280,12 @@ if trades_df is not None and not trades_df.empty:
     total_pnl = trades_df["pnl_pct"].sum() if "pnl_pct" in trades_df.columns else 0
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Closed Trades", total)
+    m1.metric("Closed", total)
     m2.metric("Win Rate", f"{winrate:.1f}%")
     m3.metric("Avg PnL", f"{avg_pnl:+.2f}%")
     m4.metric("Total PnL", f"{total_pnl:+.2f}%")
 
     if "timeframe" in trades_df.columns:
-        st.markdown("**By Timeframe**")
         by_tf = trades_df.groupby("timeframe").agg(
             Trades=("pnl_pct", "count"),
             WinRate=("win", lambda x: f"{x.mean()*100:.0f}%"),
@@ -298,10 +294,10 @@ if trades_df is not None and not trades_df.empty:
         ).round(2)
         st.dataframe(by_tf, use_container_width=True)
 else:
-    st.info("No closed paper trades yet. Run `python paper_trading.py --loop` to start collecting data.")
+    st.info("No closed trades yet.")
 
 st.markdown("---")
-st.caption("Run paper trading in background: `python paper_trading.py --loop`")
+st.caption("Start bot: `python -m algo_bot.bot start`  |  Status: `python -m algo_bot.bot status`")
 
 time.sleep(25)
 st.rerun()
