@@ -1,17 +1,17 @@
 {
   "open_trades": {
-    "15m": {
-      "id": "15m_1788615412",
+    "4h": {
+      "id": "4h_1788624619",
       "symbol": "BTCUSD",
-      "timeframe": "15m",
-      "side": "BUY",
-      "entry": 79663.5,
-      "take_profit": 79733.75,
-      "stop_loss": 79593.25,
-      "entry_time": "2026-09-05T13:36:52.564671+00:00",
-      "bars_held": 4,
-      "confidence": 0.473,
-      "max_holding": 32,
+      "timeframe": "4h",
+      "side": "SELL",
+      "entry": 79754.5,
+      "take_profit": 77965.93,
+      "stop_loss": 81543.07,
+      "entry_time": "2026-09-05T16:10:19.161572+00:00",
+      "bars_held": 0,
+      "confidence": 0.469,
+      "max_holding": 18,
       "mode": "PAPER"
     }
   }
