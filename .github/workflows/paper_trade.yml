@@ -1,0 +1,42 @@
+name: Paper Trade Check
+
+on:
+  schedule:
+    # Every 30 minutes
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  paper-trade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run one paper-trade check
+        run: python -m algo_bot.bot once
+
+      - name: Save state and trades
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add algo_bot/state.json algo_bot/trades.csv || true
+          if git diff --cached --quiet; then
+            echo "No paper-trade file changes"
+          else
+            git commit -m "chore: update paper trading state"
+            git push
+          fi
