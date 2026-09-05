@@ -1,6 +1,6 @@
 """
 app.py - Leverage Signal Engine
-Balanced model + Multi-TF table + Algo Bot Dashboard
+Model table + Candlestick comparison table
 """
 
 import streamlit as st
@@ -15,6 +15,7 @@ from sklearn.ensemble import RandomForestClassifier
 
 from ml_features import build_features, FEATURE_NAMES, WINNING_FEATURES
 from triple_barrier import triple_barrier_labels
+from candle_patterns import detect_candle_pattern
 
 st.set_page_config(page_title="Leverage Signal", layout="centered", initial_sidebar_state="collapsed")
 
@@ -29,7 +30,6 @@ DELTA_BASE = "https://api.india.delta.exchange"
 WINNING_FEATURE_INDICES = [FEATURE_NAMES.index(f) for f in WINNING_FEATURES]
 K_PROFIT, K_STOP = 2.0, 2.0
 
-# Support both old and new paper trading locations
 STATE_FILES = ["algo_bot/state.json", "paper_state.json"]
 TRADE_FILES = ["algo_bot/trades.csv", "paper_trades.csv"]
 
@@ -137,9 +137,52 @@ def load_bot_trades():
                 pass
     return pd.DataFrame()
 
+def agree_label(model_sig, candle_sig):
+    if model_sig in ("N/A", None) or candle_sig in (None,):
+        return "-"
+    if model_sig == candle_sig:
+        return "AGREE"
+    if "HOLD" in (model_sig, candle_sig):
+        return "MIXED"
+    return "CONFLICT"
+
+def make_colored_table(df, extra_signal_cols=None):
+    extra_signal_cols = extra_signal_cols or []
+    html = "<table style='width:100%; border-collapse: collapse; font-size: 0.82rem;'>"
+    html += "<thead><tr style='background:#1e293b; color:white;'>"
+    for col in df.columns:
+        html += f"<th style='padding:7px; text-align:center; border:1px solid #334155;'>{col}</th>"
+    html += "</tr></thead><tbody>"
+    signal_cols = ["Signal", "Model", "Candle"] + extra_signal_cols
+    for _, row in df.iterrows():
+        html += "<tr>"
+        for col in df.columns:
+            val = row[col]
+            style = "padding:7px; text-align:center; border:1px solid #334155;"
+            if col in signal_cols:
+                if val == "BUY": style += "background-color:#16a34a; color:white; font-weight:bold;"
+                elif val == "SELL": style += "background-color:#dc2626; color:white; font-weight:bold;"
+                elif val == "HOLD": style += "background-color:#ea580c; color:white; font-weight:bold;"
+            elif col == "Agree":
+                if val == "AGREE": style += "background-color:#16a34a; color:white; font-weight:bold;"
+                elif val == "CONFLICT": style += "background-color:#dc2626; color:white; font-weight:bold;"
+                elif val == "MIXED": style += "background-color:#ca8a04; color:white; font-weight:bold;"
+            elif col == "Confidence":
+                try:
+                    v = float(val)
+                    if v >= 55: style += "background-color:#16a34a; color:white;"
+                    elif v >= 45: style += "background-color:#4ade80; color:black;"
+                    elif v >= 35: style += "background-color:#fdba74; color:black;"
+                    else: style += "background-color:#fca5a5; color:black;"
+                except: pass
+            html += f"<td style='{style}'>{val}</td>"
+        html += "</tr>"
+    html += "</tbody></table>"
+    return html
+
 # -------------------- HEADER --------------------
 st.markdown("### Leverage Signal")
-st.caption(f"Balanced 3-Class Model · {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"Model + Candles · {datetime.now().strftime('%H:%M:%S')}")
 
 cols = st.columns(len(ASSETS))
 for col, sym in zip(cols, ASSETS):
@@ -156,10 +199,9 @@ chg = float(ticker.get("price_change_24h", 0.0)) * 100
 st.markdown(f"## {symbol.replace('USD','')}  ${live_price:,.2f}")
 st.markdown(f"{'+' if chg >= 0 else ''}{chg:.2f}% (24h)")
 
-st.markdown("---")
-st.subheader("Multi-Timeframe Predictions")
-
-rows = []
+model_rows = []
+candle_rows = []
+compare_rows = []
 progress = st.progress(0)
 status = st.empty()
 
@@ -168,10 +210,16 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
     candles = fetch_candles(symbol, cfg["resolution"], cfg["days"])
 
     if not candles or len(candles) < 70:
-        rows.append({
+        model_rows.append({
             "Timeframe": cfg["label"], "Signal": "N/A", "Confidence": "-",
             "BUY %": "-", "SELL %": "-", "Entry": "-",
             "Take Profit": "-", "Stop Loss": "-", "Hold": cfg["hold"]
+        })
+        candle_rows.append({
+            "Timeframe": cfg["label"], "Pattern": "-", "Candle": "N/A"
+        })
+        compare_rows.append({
+            "Timeframe": cfg["label"], "Model": "N/A", "Candle": "N/A", "Agree": "-"
         })
         progress.progress((i + 1) / len(TIMEFRAMES))
         continue
@@ -180,11 +228,13 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
     high = np.array([c["high"] for c in candles], dtype=float)
     low = np.array([c["low"] for c in candles], dtype=float)
     volume = np.array([c["volume"] for c in candles], dtype=float)
+    open_ = np.array([c.get("open", c["close"]) for c in candles], dtype=float)
 
     buy_p, sell_p, hold_p, cur_vol = run_balanced_model(
         tuple(close), tuple(high), tuple(low), tuple(volume), cfg["max_holding"]
     )
     signal, conf = decide_signal(buy_p, sell_p, hold_p)
+    pattern, candle_bias = detect_candle_pattern(open_, high, low, close)
 
     vol = cur_vol or 0.01
     if signal == "BUY":
@@ -197,7 +247,7 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
         tp = live_price * (1 + K_PROFIT * vol)
         sl = live_price * (1 - K_STOP * vol)
 
-    rows.append({
+    model_rows.append({
         "Timeframe": cfg["label"],
         "Signal": signal,
         "Confidence": f"{conf:.0f}" if buy_p is not None else "-",
@@ -208,96 +258,58 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
         "Stop Loss": f"${sl:,.0f}",
         "Hold": cfg["hold"]
     })
+    candle_rows.append({
+        "Timeframe": cfg["label"],
+        "Pattern": pattern,
+        "Candle": candle_bias
+    })
+    compare_rows.append({
+        "Timeframe": cfg["label"],
+        "Model": signal,
+        "Candle": candle_bias,
+        "Agree": agree_label(signal, candle_bias)
+    })
     progress.progress((i + 1) / len(TIMEFRAMES))
 
 status.empty()
 progress.empty()
 
-df = pd.DataFrame(rows)
+st.markdown("---")
+st.subheader("1) Model Predictions")
+st.caption("RandomForest + Triple Barrier + indicators")
+st.markdown(make_colored_table(pd.DataFrame(model_rows)), unsafe_allow_html=True)
 
-def make_colored_table(df):
-    html = "<table style='width:100%; border-collapse: collapse; font-size: 0.85rem;'>"
-    html += "<thead><tr style='background:#1e293b; color:white;'>"
-    for col in df.columns:
-        html += f"<th style='padding:7px; text-align:center; border:1px solid #334155;'>{col}</th>"
-    html += "</tr></thead><tbody>"
-    for _, row in df.iterrows():
-        html += "<tr>"
-        for col in df.columns:
-            val = row[col]
-            style = "padding:7px; text-align:center; border:1px solid #334155;"
-            if col == "Signal":
-                if val == "BUY": style += "background-color:#16a34a; color:white; font-weight:bold;"
-                elif val == "SELL": style += "background-color:#dc2626; color:white; font-weight:bold;"
-                elif val == "HOLD": style += "background-color:#ea580c; color:white; font-weight:bold;"
-            elif col == "Confidence":
-                try:
-                    v = float(val)
-                    if v >= 55: style += "background-color:#16a34a; color:white;"
-                    elif v >= 45: style += "background-color:#4ade80; color:black;"
-                    elif v >= 35: style += "background-color:#fdba74; color:black;"
-                    else: style += "background-color:#fca5a5; color:black;"
-                except: pass
-            html += f"<td style='{style}'>{val}</td>"
-        html += "</tr>"
-    html += "</tbody></table>"
-    return html
+st.markdown("---")
+st.subheader("2) Candlestick Patterns")
+st.caption("Last candle / last 2 candles only: Hammer, Hanging Man, Shooting Star, Doji, Engulfing")
+st.markdown(make_colored_table(pd.DataFrame(candle_rows)), unsafe_allow_html=True)
 
-st.markdown(make_colored_table(df), unsafe_allow_html=True)
-st.caption("🟢 BUY · 🔴 SELL · 🟠 HOLD | Balanced 3-class model")
+st.markdown("---")
+st.subheader("3) Do they agree?")
+st.caption("AGREE = same side · MIXED = one is HOLD · CONFLICT = BUY vs SELL")
+st.markdown(make_colored_table(pd.DataFrame(compare_rows)), unsafe_allow_html=True)
+
+st.caption("If they conflict, treat as HOLD unless model confidence is very high.")
 
 # ==================== ALGO BOT DASHBOARD ====================
 st.markdown("---")
 st.subheader("Algo Bot Dashboard")
-st.caption("Standalone bot · Max 4 trades/day · Telegram alerts supported")
-
 state = load_bot_state()
 open_trades = state.get("open_trades", {})
 trades_df = load_bot_trades()
 
-st.markdown("#### Currently Open Trades")
 if open_trades:
     open_rows = []
     for tf, t in open_trades.items():
         open_rows.append({
-            "TF": tf,
-            "Side": t.get("side", "-"),
+            "TF": tf, "Side": t.get("side", "-"),
             "Entry": f"${t.get('entry', 0):,.0f}",
             "TP": f"${t.get('take_profit', 0):,.0f}",
-            "SL": f"${t.get('stop_loss', 0):,.0f}",
-            "Confidence": f"{t.get('confidence', 0)*100:.0f}%",
-            "Bars": t.get("bars_held", 0)
+            "SL": f"${t.get('stop_loss', 0):,.0f}"
         })
     st.dataframe(pd.DataFrame(open_rows), use_container_width=True, hide_index=True)
 else:
-    st.info("No open trades. Start the bot with: `python -m algo_bot.bot start`")
-
-st.markdown("#### Performance")
-if trades_df is not None and not trades_df.empty:
-    total = len(trades_df)
-    winrate = trades_df["win"].mean() * 100 if "win" in trades_df.columns else 0
-    avg_pnl = trades_df["pnl_pct"].mean() if "pnl_pct" in trades_df.columns else 0
-    total_pnl = trades_df["pnl_pct"].sum() if "pnl_pct" in trades_df.columns else 0
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Closed", total)
-    m2.metric("Win Rate", f"{winrate:.1f}%")
-    m3.metric("Avg PnL", f"{avg_pnl:+.2f}%")
-    m4.metric("Total PnL", f"{total_pnl:+.2f}%")
-
-    if "timeframe" in trades_df.columns:
-        by_tf = trades_df.groupby("timeframe").agg(
-            Trades=("pnl_pct", "count"),
-            WinRate=("win", lambda x: f"{x.mean()*100:.0f}%"),
-            AvgPnL=("pnl_pct", "mean"),
-            TotalPnL=("pnl_pct", "sum")
-        ).round(2)
-        st.dataframe(by_tf, use_container_width=True)
-else:
-    st.info("No closed trades yet.")
-
-st.markdown("---")
-st.caption("Start bot: `python -m algo_bot.bot start`  |  Status: `python -m algo_bot.bot status`")
+    st.info("No open algo-bot trades.")
 
 time.sleep(25)
 st.rerun()
