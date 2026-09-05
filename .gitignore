@@ -11,9 +11,11 @@ venv/
 dist/
 build/
 
-# Data & logs
+# Data & logs (keep algo bot paper-trade files so Actions + Streamlit can share them)
 *.csv
 *.json
+!algo_bot/state.json
+!algo_bot/trades.csv
 paper_trade_*.csv
 paper_trade_*.json
 *.log
