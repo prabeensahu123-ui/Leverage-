@@ -1,12 +1,12 @@
 """
 algo_bot/bot.py
-Standalone Algo Trading Bot
+Standalone Algo Trading Bot + Telegram Alerts
 
 Commands:
-  python -m algo_bot.bot start         → Run continuous loop
-  python -m algo_bot.bot once          → Run one check
-  python -m algo_bot.bot status        → Show open trades + performance
-  python -m algo_bot.bot performance   → Detailed performance report
+  python -m algo_bot.bot start
+  python -m algo_bot.bot once
+  python -m algo_bot.bot status
+  python -m algo_bot.bot performance
 """
 
 import os
@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-# Allow running both as module and as script
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from algo_bot.config import (
@@ -25,6 +24,9 @@ from algo_bot.config import (
     CHECK_INTERVAL_MINUTES, MODE
 )
 from algo_bot.model_engine import get_signal
+from algo_bot.notifier import (
+    is_configured, notify_trade_opened, notify_trade_closed, notify_status
+)
 
 
 def ensure_dirs():
@@ -65,6 +67,7 @@ def close_trade(trade, exit_price, reason):
         "win": bool(pnl_pct > 0)
     }
     log_trade(result)
+    notify_trade_closed(result)          # Telegram alert
     return result
 
 
@@ -79,67 +82,64 @@ def run_once():
     for tf_key, cfg in TIMEFRAMES.items():
         print(f"\n▶ {cfg['label']} ({tf_key})")
 
-        # ----- Manage open trade -----
         if tf_key in open_trades:
             trade = open_trades[tf_key]
             signal_data = get_signal(SYMBOL, cfg["resolution"], cfg["days"], cfg["max_holding_bars"])
             if signal_data is None:
-                print("  Could not fetch price, skipping management")
+                print("  Could not fetch price")
                 continue
 
             live_price = signal_data["price"]
             bars_held = trade.get("bars_held", 0) + 1
             trade["bars_held"] = bars_held
-
             closed = False
+
             if trade["side"] == "BUY":
                 if live_price >= trade["take_profit"]:
                     res = close_trade(trade, live_price, "Take Profit")
-                    print(f"  ✅ BUY closed at TP | PnL: {res['pnl_pct']:+.2f}%")
+                    print(f"  ✅ BUY TP | {res['pnl_pct']:+.2f}%")
                     closed = True
                 elif live_price <= trade["stop_loss"]:
                     res = close_trade(trade, live_price, "Stop Loss")
-                    print(f"  ❌ BUY closed at SL | PnL: {res['pnl_pct']:+.2f}%")
+                    print(f"  ❌ BUY SL | {res['pnl_pct']:+.2f}%")
                     closed = True
                 elif bars_held >= cfg["max_holding_bars"]:
                     res = close_trade(trade, live_price, "Max Holding")
-                    print(f"  ⏰ BUY time exit | PnL: {res['pnl_pct']:+.2f}%")
+                    print(f"  ⏰ BUY Time | {res['pnl_pct']:+.2f}%")
                     closed = True
             else:
                 if live_price <= trade["take_profit"]:
                     res = close_trade(trade, live_price, "Take Profit")
-                    print(f"  ✅ SELL closed at TP | PnL: {res['pnl_pct']:+.2f}%")
+                    print(f"  ✅ SELL TP | {res['pnl_pct']:+.2f}%")
                     closed = True
                 elif live_price >= trade["stop_loss"]:
                     res = close_trade(trade, live_price, "Stop Loss")
-                    print(f"  ❌ SELL closed at SL | PnL: {res['pnl_pct']:+.2f}%")
+                    print(f"  ❌ SELL SL | {res['pnl_pct']:+.2f}%")
                     closed = True
                 elif bars_held >= cfg["max_holding_bars"]:
                     res = close_trade(trade, live_price, "Max Holding")
-                    print(f"  ⏰ SELL time exit | PnL: {res['pnl_pct']:+.2f}%")
+                    print(f"  ⏰ SELL Time | {res['pnl_pct']:+.2f}%")
                     closed = True
 
             if closed:
                 del open_trades[tf_key]
             else:
                 open_trades[tf_key] = trade
-                print(f"  Still open: {trade['side']} @ ${trade['entry']} | Bars: {bars_held}")
+                print(f"  Open: {trade['side']} @ ${trade['entry']} | Bars {bars_held}")
             continue
 
-        # ----- Look for new signal -----
+        # New signal check
         signal = get_signal(SYMBOL, cfg["resolution"], cfg["days"], cfg["max_holding_bars"])
-
         if signal is None:
             print("  Insufficient data")
             continue
 
-        print(f"  BUY: {signal['buy_proba']:.2f} | SELL: {signal['sell_proba']:.2f} | HOLD: {signal['hold_proba']:.2f}")
+        print(f"  BUY {signal['buy_proba']:.2f} | SELL {signal['sell_proba']:.2f} | HOLD {signal['hold_proba']:.2f}")
 
         if signal["side"] is None:
             print("  No strong signal")
             continue
 
-        # Open new paper trade
         trade = {
             "id": f"{tf_key}_{int(time.time())}",
             "symbol": SYMBOL,
@@ -155,12 +155,13 @@ def run_once():
             "mode": MODE
         }
         open_trades[tf_key] = trade
+        notify_trade_opened(trade)       # Telegram alert
         print(f"  📈 NEW {signal['side']} @ ${signal['price']:,.2f}")
-        print(f"     TP: ${signal['take_profit']:,.2f} | SL: ${signal['stop_loss']:,.2f} | Conf: {signal['confidence']:.1%}")
+        print(f"     TP ${signal['take_profit']:,.2f} | SL ${signal['stop_loss']:,.2f} | Conf {signal['confidence']:.1%}")
 
     state["open_trades"] = open_trades
     save_state(state)
-    print(f"\nOpen trades now: {list(open_trades.keys())}")
+    print(f"\nOpen trades: {list(open_trades.keys())}")
 
 
 def show_status():
@@ -171,13 +172,13 @@ def show_status():
     print("ALGO BOT STATUS")
     print(f"{'='*50}")
     print(f"Mode          : {MODE}")
-    print(f"Symbol        : {SYMBOL}")
+    print(f"Telegram      : {'Enabled' if is_configured() else 'Not configured'}")
     print(f"Open Trades   : {len(open_trades)}")
 
     if open_trades:
         print("\nCurrently Open:")
         for tf, t in open_trades.items():
-            print(f"  {tf:5} | {t['side']:4} | Entry ${t['entry']:,.0f} | TP ${t['take_profit']:,.0f} | SL ${t['stop_loss']:,.0f} | Conf {t['confidence']:.0%}")
+            print(f"  {tf:5} | {t['side']:4} | ${t['entry']:,.0f} → TP ${t['take_profit']:,.0f} | SL ${t['stop_loss']:,.0f}")
     else:
         print("\nNo open trades.")
 
@@ -208,17 +209,15 @@ def show_performance():
     print(f"Win Rate      : {df['win'].mean()*100:.1f}%")
     print(f"Average PnL   : {df['pnl_pct'].mean():+.2f}%")
     print(f"Total PnL     : {df['pnl_pct'].sum():+.2f}%")
-    print(f"Best Trade    : {df['pnl_pct'].max():+.2f}%")
-    print(f"Worst Trade   : {df['pnl_pct'].min():+.2f}%")
+    print(f"Best / Worst  : {df['pnl_pct'].max():+.2f}% / {df['pnl_pct'].min():+.2f}%")
 
     print("\nBy Timeframe:")
-    summary = df.groupby("timeframe").agg(
+    print(df.groupby("timeframe").agg(
         trades=("pnl_pct", "count"),
         winrate=("win", lambda x: f"{x.mean()*100:.1f}%"),
         avg_pnl=("pnl_pct", "mean"),
         total_pnl=("pnl_pct", "sum")
-    ).round(2)
-    print(summary)
+    ).round(2))
 
 
 def main():
@@ -226,25 +225,25 @@ def main():
 
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python -m algo_bot.bot start         # Continuous mode")
-        print("  python -m algo_bot.bot once          # Single check")
-        print("  python -m algo_bot.bot status        # Current status")
-        print("  python -m algo_bot.bot performance   # Full report")
+        print("  python -m algo_bot.bot start")
+        print("  python -m algo_bot.bot once")
+        print("  python -m algo_bot.bot status")
+        print("  python -m algo_bot.bot performance")
         return
 
     cmd = sys.argv[1].lower()
 
     if cmd == "start":
-        print(f"Starting Algo Bot in continuous mode (every {CHECK_INTERVAL_MINUTES} min)")
+        print(f"Algo Bot started (every {CHECK_INTERVAL_MINUTES} min)")
+        print(f"Telegram alerts: {'ON' if is_configured() else 'OFF (set TELEGRAM_TOKEN & TELEGRAM_CHAT_ID)'}")
         print("Press Ctrl+C to stop.\n")
         while True:
             try:
                 run_once()
                 show_status()
-                print(f"\nSleeping {CHECK_INTERVAL_MINUTES} minutes...\n")
                 time.sleep(CHECK_INTERVAL_MINUTES * 60)
             except KeyboardInterrupt:
-                print("\nBot stopped by user.")
+                print("\nBot stopped.")
                 break
             except Exception as e:
                 print(f"Error: {e}")
