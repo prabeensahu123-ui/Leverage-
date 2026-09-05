@@ -1,6 +1,6 @@
 """
 app.py - Leverage Signal Engine
-Balanced 3-class training (BUY / SELL / HOLD) + Multi-timeframe table
+Balanced 3-class model + Multi-timeframe table + Paper Trading Dashboard
 """
 
 import streamlit as st
@@ -8,13 +8,13 @@ import requests
 import pandas as pd
 import numpy as np
 import time
+import os
+import json
 from datetime import datetime
 from sklearn.ensemble import RandomForestClassifier
 
 from ml_features import build_features, FEATURE_NAMES, WINNING_FEATURES
 from triple_barrier import triple_barrier_labels
-from signal_engine import sma, ema, rsi, macd
-from features import atr
 
 st.set_page_config(page_title="Leverage Signal", layout="centered", initial_sidebar_state="collapsed")
 
@@ -28,6 +28,8 @@ st.markdown("""
 DELTA_BASE = "https://api.india.delta.exchange"
 WINNING_FEATURE_INDICES = [FEATURE_NAMES.index(f) for f in WINNING_FEATURES]
 K_PROFIT, K_STOP = 2.0, 2.0
+TRADE_LOG_FILE = "paper_trades.csv"
+STATE_FILE = "paper_state.json"
 
 TIMEFRAMES = {
     "15m": {"resolution": "15m", "days": 30,  "max_holding": 32, "label": "15m",  "hold": "~8h"},
@@ -65,12 +67,6 @@ def fetch_candles(symbol, resolution, days):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def run_balanced_model(close_t, high_t, low_t, vol_t, max_holding):
-    """
-    3-class balanced model:
-      1  → Upper barrier first (BUY)
-     -1  → Lower barrier first (SELL)
-      0  → Timeout (HOLD)
-    """
     close = np.array(close_t, dtype=float)
     high = np.array(high_t, dtype=float)
     low = np.array(low_t, dtype=float)
@@ -82,9 +78,8 @@ def run_balanced_model(close_t, high_t, low_t, vol_t, max_holding):
     X, y = [], []
     for i in range(55, len(close) - 1):
         if valid[i]:
-            # Keep all three classes: 1, -1, 0
             X.append(build_features(ohlcv, i))
-            y.append(labels[i])          # +1, -1 or 0
+            y.append(labels[i])
 
     if len(X) < 90:
         return None, None, None, None
@@ -92,49 +87,52 @@ def run_balanced_model(close_t, high_t, low_t, vol_t, max_holding):
     X = np.array(X)[:, WINNING_FEATURE_INDICES]
     y = np.array(y)
 
-    # Balanced RandomForest – important for detecting SELL properly
     model = RandomForestClassifier(
-        n_estimators=120,
-        max_depth=6,
-        min_samples_leaf=8,
-        class_weight="balanced",          # ← key change
-        random_state=42,
-        n_jobs=-1
+        n_estimators=120, max_depth=6, min_samples_leaf=8,
+        class_weight="balanced", random_state=42, n_jobs=-1
     )
     model.fit(X, y)
 
-    # Current features
     current_feats = np.array([build_features(ohlcv, len(close) - 1)])[:, WINNING_FEATURE_INDICES]
     proba = model.predict_proba(current_feats)[0]
     classes = list(model.classes_)
 
-    # Extract probabilities for each class
     buy_proba = proba[classes.index(1)] if 1 in classes else 0.0
     sell_proba = proba[classes.index(-1)] if -1 in classes else 0.0
     hold_proba = proba[classes.index(0)] if 0 in classes else 0.0
 
     cur_vol = float(vol[-1]) if len(vol) and vol[-1] > 0 else float(np.std(np.diff(np.log(close[-15:]))))
-
     return buy_proba, sell_proba, hold_proba, cur_vol
 
 def decide_signal(buy_p, sell_p, hold_p):
-    """Clear decision logic with balanced view."""
     if buy_p is None:
         return "N/A", 0.0
-
-    # Strong signals first
     if buy_p >= 0.45 and buy_p > sell_p + 0.10:
         return "BUY", buy_p * 100
     if sell_p >= 0.45 and sell_p > buy_p + 0.10:
         return "SELL", sell_p * 100
-
-    # Medium confidence
     if buy_p >= 0.38 and buy_p > sell_p:
         return "BUY", buy_p * 100
     if sell_p >= 0.38 and sell_p > buy_p:
         return "SELL", sell_p * 100
-
     return "HOLD", max(buy_p, sell_p, hold_p) * 100
+
+def load_paper_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {"open_trades": {}}
+    return {"open_trades": {}}
+
+def load_paper_trades():
+    if os.path.exists(TRADE_LOG_FILE):
+        try:
+            return pd.read_csv(TRADE_LOG_FILE)
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
 
 # -------------------- HEADER --------------------
 st.markdown("### Leverage Signal")
@@ -156,7 +154,7 @@ st.markdown(f"## {symbol.replace('USD','')}  ${live_price:,.2f}")
 st.markdown(f"{'+' if chg >= 0 else ''}{chg:.2f}% (24h)")
 
 st.markdown("---")
-st.subheader("Multi-Timeframe Predictions (Balanced)")
+st.subheader("Multi-Timeframe Predictions")
 
 rows = []
 progress = st.progress(0)
@@ -168,15 +166,9 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
 
     if not candles or len(candles) < 70:
         rows.append({
-            "Timeframe": cfg["label"],
-            "Signal": "N/A",
-            "Confidence": "-",
-            "BUY %": "-",
-            "SELL %": "-",
-            "Entry": "-",
-            "Take Profit": "-",
-            "Stop Loss": "-",
-            "Hold": cfg["hold"]
+            "Timeframe": cfg["label"], "Signal": "N/A", "Confidence": "-",
+            "BUY %": "-", "SELL %": "-", "Entry": "-",
+            "Take Profit": "-", "Stop Loss": "-", "Hold": cfg["hold"]
         })
         progress.progress((i + 1) / len(TIMEFRAMES))
         continue
@@ -189,12 +181,10 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
     buy_p, sell_p, hold_p, cur_vol = run_balanced_model(
         tuple(close), tuple(high), tuple(low), tuple(volume), cfg["max_holding"]
     )
-
     signal, conf = decide_signal(buy_p, sell_p, hold_p)
 
     entry = live_price
     vol = cur_vol or 0.01
-
     if signal == "BUY":
         tp = live_price * (1 + K_PROFIT * vol)
         sl = live_price * (1 - K_STOP * vol)
@@ -229,13 +219,11 @@ def make_colored_table(df):
     for col in df.columns:
         html += f"<th style='padding:7px; text-align:center; border:1px solid #334155;'>{col}</th>"
     html += "</tr></thead><tbody>"
-
     for _, row in df.iterrows():
         html += "<tr>"
         for col in df.columns:
             val = row[col]
             style = "padding:7px; text-align:center; border:1px solid #334155;"
-
             if col == "Signal":
                 if val == "BUY":
                     style += "background-color:#16a34a; color:white; font-weight:bold;"
@@ -243,33 +231,77 @@ def make_colored_table(df):
                     style += "background-color:#dc2626; color:white; font-weight:bold;"
                 elif val == "HOLD":
                     style += "background-color:#ea580c; color:white; font-weight:bold;"
-
             elif col == "Confidence":
                 try:
                     v = float(val)
-                    if v >= 55:
-                        style += "background-color:#16a34a; color:white;"
-                    elif v >= 45:
-                        style += "background-color:#4ade80; color:black;"
-                    elif v >= 35:
-                        style += "background-color:#fdba74; color:black;"
-                    else:
-                        style += "background-color:#fca5a5; color:black;"
-                except Exception:
-                    pass
-
+                    if v >= 55: style += "background-color:#16a34a; color:white;"
+                    elif v >= 45: style += "background-color:#4ade80; color:black;"
+                    elif v >= 35: style += "background-color:#fdba74; color:black;"
+                    else: style += "background-color:#fca5a5; color:black;"
+                except: pass
             html += f"<td style='{style}'>{val}</td>"
         html += "</tr>"
     html += "</tbody></table>"
     return html
 
 st.markdown(make_colored_table(df), unsafe_allow_html=True)
+st.caption("🟢 BUY · 🔴 SELL · 🟠 HOLD | Balanced 3-class model")
 
-st.caption("Model is now 3-class Balanced (BUY / SELL / HOLD) with class_weight='balanced'")
-st.caption("🟢 BUY · 🔴 SELL · 🟠 HOLD  |  Shows both BUY % and SELL % probability")
+# ==================== PAPER TRADING DASHBOARD ====================
+st.markdown("---")
+st.subheader("Paper Trading Dashboard")
+st.caption("Max 4 trades/day (15m · 1h · 4h · Daily) · 1 open trade per timeframe")
+
+state = load_paper_state()
+open_trades = state.get("open_trades", {})
+trades_df = load_paper_trades()
+
+# Open Trades
+st.markdown("#### Currently Open Trades")
+if open_trades:
+    open_rows = []
+    for tf, t in open_trades.items():
+        open_rows.append({
+            "TF": tf,
+            "Side": t.get("side", "-"),
+            "Entry": f"${t.get('entry', 0):,.0f}",
+            "TP": f"${t.get('take_profit', 0):,.0f}",
+            "SL": f"${t.get('stop_loss', 0):,.0f}",
+            "Confidence": f"{t.get('confidence', 0)*100:.0f}%",
+            "Bars Held": t.get("bars_held", 0)
+        })
+    st.dataframe(pd.DataFrame(open_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("No open paper trades right now.")
+
+# Performance Summary
+st.markdown("#### Performance Summary")
+if trades_df is not None and not trades_df.empty:
+    total = len(trades_df)
+    winrate = trades_df["win"].mean() * 100 if "win" in trades_df.columns else 0
+    avg_pnl = trades_df["pnl_pct"].mean() if "pnl_pct" in trades_df.columns else 0
+    total_pnl = trades_df["pnl_pct"].sum() if "pnl_pct" in trades_df.columns else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Closed Trades", total)
+    m2.metric("Win Rate", f"{winrate:.1f}%")
+    m3.metric("Avg PnL", f"{avg_pnl:+.2f}%")
+    m4.metric("Total PnL", f"{total_pnl:+.2f}%")
+
+    if "timeframe" in trades_df.columns:
+        st.markdown("**By Timeframe**")
+        by_tf = trades_df.groupby("timeframe").agg(
+            Trades=("pnl_pct", "count"),
+            WinRate=("win", lambda x: f"{x.mean()*100:.0f}%"),
+            AvgPnL=("pnl_pct", "mean"),
+            TotalPnL=("pnl_pct", "sum")
+        ).round(2)
+        st.dataframe(by_tf, use_container_width=True)
+else:
+    st.info("No closed paper trades yet. Run `python paper_trading.py --loop` to start collecting data.")
 
 st.markdown("---")
-st.caption("Delta Exchange · Balanced RandomForest + Triple Barrier · Auto refresh")
+st.caption("Run paper trading in background: `python paper_trading.py --loop`")
 
-time.sleep(22)
+time.sleep(25)
 st.rerun()
