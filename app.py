@@ -1,6 +1,6 @@
 """
 app.py - Leverage Signal Engine
-Model table + Candlestick comparison table
+Model + Candles + Paper check button on the dashboard
 """
 
 import streamlit as st
@@ -45,6 +45,8 @@ ASSETS = ["BTCUSD", "ETHUSD", "SOLUSD"]
 
 if "symbol" not in st.session_state:
     st.session_state.symbol = "BTCUSD"
+if "paper_msg" not in st.session_state:
+    st.session_state.paper_msg = ""
 
 @st.cache_data(ttl=6, show_spinner=False)
 def fetch_ticker(symbol):
@@ -182,7 +184,7 @@ def make_colored_table(df, extra_signal_cols=None):
 
 # -------------------- HEADER --------------------
 st.markdown("### Leverage Signal")
-st.caption(f"Model + Candles · {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"Model + Candles + Paper Check · {datetime.now().strftime('%H:%M:%S')}")
 
 cols = st.columns(len(ASSETS))
 for col, sym in zip(cols, ASSETS):
@@ -215,12 +217,8 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
             "BUY %": "-", "SELL %": "-", "Entry": "-",
             "Take Profit": "-", "Stop Loss": "-", "Hold": cfg["hold"]
         })
-        candle_rows.append({
-            "Timeframe": cfg["label"], "Pattern": "-", "Candle": "N/A"
-        })
-        compare_rows.append({
-            "Timeframe": cfg["label"], "Model": "N/A", "Candle": "N/A", "Agree": "-"
-        })
+        candle_rows.append({"Timeframe": cfg["label"], "Pattern": "-", "Candle": "N/A"})
+        compare_rows.append({"Timeframe": cfg["label"], "Model": "N/A", "Candle": "N/A", "Agree": "-"})
         progress.progress((i + 1) / len(TIMEFRAMES))
         continue
 
@@ -258,15 +256,9 @@ for i, (tf_key, cfg) in enumerate(TIMEFRAMES.items()):
         "Stop Loss": f"${sl:,.0f}",
         "Hold": cfg["hold"]
     })
-    candle_rows.append({
-        "Timeframe": cfg["label"],
-        "Pattern": pattern,
-        "Candle": candle_bias
-    })
+    candle_rows.append({"Timeframe": cfg["label"], "Pattern": pattern, "Candle": candle_bias})
     compare_rows.append({
-        "Timeframe": cfg["label"],
-        "Model": signal,
-        "Candle": candle_bias,
+        "Timeframe": cfg["label"], "Model": signal, "Candle": candle_bias,
         "Agree": agree_label(signal, candle_bias)
     })
     progress.progress((i + 1) / len(TIMEFRAMES))
@@ -276,40 +268,69 @@ progress.empty()
 
 st.markdown("---")
 st.subheader("1) Model Predictions")
-st.caption("RandomForest + Triple Barrier + indicators")
 st.markdown(make_colored_table(pd.DataFrame(model_rows)), unsafe_allow_html=True)
 
 st.markdown("---")
 st.subheader("2) Candlestick Patterns")
-st.caption("Last candle / last 2 candles only: Hammer, Hanging Man, Shooting Star, Doji, Engulfing")
 st.markdown(make_colored_table(pd.DataFrame(candle_rows)), unsafe_allow_html=True)
 
 st.markdown("---")
 st.subheader("3) Do they agree?")
-st.caption("AGREE = same side · MIXED = one is HOLD · CONFLICT = BUY vs SELL")
 st.markdown(make_colored_table(pd.DataFrame(compare_rows)), unsafe_allow_html=True)
 
-st.caption("If they conflict, treat as HOLD unless model confidence is very high.")
-
-# ==================== ALGO BOT DASHBOARD ====================
+# ==================== PAPER TRADING ON DASHBOARD ====================
 st.markdown("---")
-st.subheader("Algo Bot Dashboard")
+st.subheader("Paper Trading")
+st.caption("Tap the button to open/close paper trades from this page. No GitHub terminal needed.")
+
+if st.button("Run Paper Check Now", use_container_width=True):
+    try:
+        from algo_bot.bot import run_once
+        run_once()
+        st.session_state.paper_msg = f"Paper check finished at {datetime.now().strftime('%H:%M:%S')}"
+    except Exception as e:
+        st.session_state.paper_msg = f"Paper check failed: {e}"
+    st.rerun()
+
+if st.session_state.paper_msg:
+    st.info(st.session_state.paper_msg)
+
 state = load_bot_state()
 open_trades = state.get("open_trades", {})
 trades_df = load_bot_trades()
 
+st.markdown("#### Open paper trades")
 if open_trades:
     open_rows = []
     for tf, t in open_trades.items():
         open_rows.append({
-            "TF": tf, "Side": t.get("side", "-"),
+            "TF": tf,
+            "Side": t.get("side", "-"),
             "Entry": f"${t.get('entry', 0):,.0f}",
             "TP": f"${t.get('take_profit', 0):,.0f}",
-            "SL": f"${t.get('stop_loss', 0):,.0f}"
+            "SL": f"${t.get('stop_loss', 0):,.0f}",
+            "Conf": f"{t.get('confidence', 0)*100:.0f}%",
+            "Bars": t.get("bars_held", 0)
         })
     st.dataframe(pd.DataFrame(open_rows), use_container_width=True, hide_index=True)
 else:
-    st.info("No open algo-bot trades.")
+    st.write("No open paper trades yet. Tap the button above.")
 
-time.sleep(25)
+st.markdown("#### Closed trades")
+if trades_df is not None and not trades_df.empty:
+    total = len(trades_df)
+    winrate = trades_df["win"].mean() * 100 if "win" in trades_df.columns else 0
+    avg_pnl = trades_df["pnl_pct"].mean() if "pnl_pct" in trades_df.columns else 0
+    total_pnl = trades_df["pnl_pct"].sum() if "pnl_pct" in trades_df.columns else 0
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Closed", total)
+    m2.metric("Win Rate", f"{winrate:.1f}%")
+    m3.metric("Avg PnL", f"{avg_pnl:+.2f}%")
+    m4.metric("Total PnL", f"{total_pnl:+.2f}%")
+else:
+    st.write("No closed paper trades yet.")
+
+st.caption("On Streamlit Cloud, saved trades can reset if the app sleeps. GitHub Action is the backup 30-min runner.")
+
+time.sleep(30)
 st.rerun()
