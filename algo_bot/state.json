@@ -9,7 +9,7 @@
       "take_profit": 79733.75,
       "stop_loss": 79593.25,
       "entry_time": "2026-09-05T13:36:52.564671+00:00",
-      "bars_held": 2,
+      "bars_held": 3,
       "confidence": 0.473,
       "max_holding": 32,
       "mode": "PAPER"
