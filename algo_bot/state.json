@@ -1,18 +1,3 @@
 {
-  "open_trades": {
-    "15m": {
-      "id": "15m_1788602982",
-      "symbol": "BTCUSD",
-      "timeframe": "15m",
-      "side": "BUY",
-      "entry": 79605.0,
-      "take_profit": 79682.4,
-      "stop_loss": 79527.6,
-      "entry_time": "2026-09-05T10:09:42.463165+00:00",
-      "bars_held": 4,
-      "confidence": 0.495,
-      "max_holding": 32,
-      "mode": "PAPER"
-    }
-  }
+  "open_trades": {}
 }
