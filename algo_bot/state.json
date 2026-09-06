@@ -1,18 +1,3 @@
 {
-  "open_trades": {
-    "4h": {
-      "id": "4h_1788624619",
-      "symbol": "BTCUSD",
-      "timeframe": "4h",
-      "side": "SELL",
-      "entry": 79754.5,
-      "take_profit": 77965.93,
-      "stop_loss": 81543.07,
-      "entry_time": "2026-09-05T16:10:19.161572+00:00",
-      "bars_held": 17,
-      "confidence": 0.469,
-      "max_holding": 18,
-      "mode": "PAPER"
-    }
-  }
+  "open_trades": {}
 }
