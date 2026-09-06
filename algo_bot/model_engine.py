@@ -1,6 +1,6 @@
 """
 algo_bot/model_engine.py
-Balanced 3-class engine with cost-aware labels and trend regime filter.
+Cost-aware model + SMA200 regime + funding/OI/dollar filters.
 """
 
 import numpy as np
@@ -9,6 +9,7 @@ from sklearn.ensemble import RandomForestClassifier
 
 from ml_features import build_features, FEATURE_NAMES, WINNING_FEATURES
 from triple_barrier import triple_barrier_labels, apply_cost_filter
+from market_context import build_market_context, apply_context_filter
 from algo_bot.config import (
     DELTA_BASE, K_PROFIT, K_STOP,
     MIN_BUY_PROBA, MIN_SELL_PROBA, MIN_EDGE,
@@ -47,7 +48,6 @@ def _sma(arr, n):
 
 
 def position_qty_btc(entry, stop):
-    """Size so that a stop hit loses about RISK_FRACTION of ACCOUNT_INR."""
     risk_inr = ACCOUNT_INR * RISK_FRACTION
     stop_dist = abs(entry - stop)
     if stop_dist <= 0 or entry <= 0:
@@ -104,6 +104,7 @@ def get_signal(symbol: str, resolution: str, days: int, max_holding: int):
 
     ticker = fetch_ticker(symbol)
     live_price = float(ticker.get("close", ticker.get("mark_price", close[-1])))
+    ctx = build_market_context(symbol)
 
     side = None
     confidence = 0.0
@@ -114,6 +115,8 @@ def get_signal(symbol: str, resolution: str, days: int, max_holding: int):
         side = "SELL"
         confidence = sell_p
 
+    side, veto_reason = apply_context_filter(side, ctx)
+
     base = {
         "side": side,
         "buy_proba": buy_p,
@@ -123,6 +126,8 @@ def get_signal(symbol: str, resolution: str, days: int, max_holding: int):
         "volatility": cur_vol,
         "regime": regime,
         "sma200": sma200,
+        "context": ctx,
+        "veto_reason": veto_reason,
     }
     if side is None:
         return base
