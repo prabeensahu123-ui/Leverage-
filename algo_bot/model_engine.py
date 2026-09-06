@@ -1,6 +1,6 @@
 """
 algo_bot/model_engine.py
-Balanced 3-class prediction engine (BUY / SELL / HOLD)
+Balanced 3-class engine with cost-aware labels and trend regime filter.
 """
 
 import numpy as np
@@ -8,10 +8,11 @@ import requests
 from sklearn.ensemble import RandomForestClassifier
 
 from ml_features import build_features, FEATURE_NAMES, WINNING_FEATURES
-from triple_barrier import triple_barrier_labels
+from triple_barrier import triple_barrier_labels, apply_cost_filter
 from algo_bot.config import (
     DELTA_BASE, K_PROFIT, K_STOP,
-    MIN_BUY_PROBA, MIN_SELL_PROBA, MIN_EDGE
+    MIN_BUY_PROBA, MIN_SELL_PROBA, MIN_EDGE,
+    MIN_LABEL_MOVE_PCT, ACCOUNT_INR, LEVERAGE, USD_INR, RISK_FRACTION
 )
 
 WINNING_FEATURE_INDICES = [FEATURE_NAMES.index(f) for f in WINNING_FEATURES]
@@ -39,10 +40,24 @@ def fetch_ticker(symbol: str):
         return {}
 
 
+def _sma(arr, n):
+    if len(arr) < n:
+        return float(arr[-1]) if len(arr) else 0.0
+    return float(np.mean(arr[-n:]))
+
+
+def position_qty_btc(entry, stop):
+    """Size so that a stop hit loses about RISK_FRACTION of ACCOUNT_INR."""
+    risk_inr = ACCOUNT_INR * RISK_FRACTION
+    stop_dist = abs(entry - stop)
+    if stop_dist <= 0 or entry <= 0:
+        return 0.0
+    qty = (risk_inr / USD_INR) / stop_dist
+    max_qty = (ACCOUNT_INR * LEVERAGE / USD_INR) / entry
+    return float(min(qty, max_qty))
+
+
 def get_signal(symbol: str, resolution: str, days: int, max_holding: int):
-    """
-    Returns dict with signal details or None
-    """
     candles = fetch_candles(symbol, resolution, days)
     if len(candles) < 80:
         return None
@@ -53,7 +68,8 @@ def get_signal(symbol: str, resolution: str, days: int, max_holding: int):
     volume = np.array([c["volume"] for c in candles], dtype=float)
     ohlcv = {"open": close, "high": high, "low": low, "close": close, "volume": volume}
 
-    labels, valid, vol, _, _ = triple_barrier_labels(close, K_PROFIT, K_STOP, max_holding)
+    labels, valid, vol, exit_prices, _ = triple_barrier_labels(close, K_PROFIT, K_STOP, max_holding)
+    labels = apply_cost_filter(labels, close, exit_prices, valid, MIN_LABEL_MOVE_PCT)
 
     X, y = [], []
     for i in range(55, len(close) - 1):
@@ -68,12 +84,8 @@ def get_signal(symbol: str, resolution: str, days: int, max_holding: int):
     y = np.array(y)
 
     model = RandomForestClassifier(
-        n_estimators=120,
-        max_depth=6,
-        min_samples_leaf=8,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1
+        n_estimators=120, max_depth=6, min_samples_leaf=8,
+        class_weight="balanced", random_state=42, n_jobs=-1
     )
     model.fit(X, y)
 
@@ -86,30 +98,34 @@ def get_signal(symbol: str, resolution: str, days: int, max_holding: int):
     hold_p = float(proba[classes.index(0)]) if 0 in classes else 0.0
 
     cur_vol = float(vol[-1]) if len(vol) and vol[-1] > 0 else float(np.std(np.diff(np.log(close[-15:]))))
-
-    # Decision
-    side = None
-    confidence = 0.0
-
-    if buy_p >= MIN_BUY_PROBA and buy_p > sell_p + MIN_EDGE:
-        side = "BUY"
-        confidence = buy_p
-    elif sell_p >= MIN_SELL_PROBA and sell_p > buy_p + MIN_EDGE:
-        side = "SELL"
-        confidence = sell_p
+    sma200 = _sma(close, min(200, len(close)))
+    price_now = float(close[-1])
+    regime = "UP" if price_now >= sma200 else "DOWN"
 
     ticker = fetch_ticker(symbol)
     live_price = float(ticker.get("close", ticker.get("mark_price", close[-1])))
 
+    side = None
+    confidence = 0.0
+    if buy_p >= MIN_BUY_PROBA and buy_p > sell_p + MIN_EDGE and regime == "UP":
+        side = "BUY"
+        confidence = buy_p
+    elif sell_p >= MIN_SELL_PROBA and sell_p > buy_p + MIN_EDGE and regime == "DOWN":
+        side = "SELL"
+        confidence = sell_p
+
+    base = {
+        "side": side,
+        "buy_proba": buy_p,
+        "sell_proba": sell_p,
+        "hold_proba": hold_p,
+        "price": live_price,
+        "volatility": cur_vol,
+        "regime": regime,
+        "sma200": sma200,
+    }
     if side is None:
-        return {
-            "side": None,
-            "buy_proba": buy_p,
-            "sell_proba": sell_p,
-            "hold_proba": hold_p,
-            "price": live_price,
-            "volatility": cur_vol
-        }
+        return base
 
     if side == "BUY":
         tp = live_price * (1 + K_PROFIT * cur_vol)
@@ -118,14 +134,11 @@ def get_signal(symbol: str, resolution: str, days: int, max_holding: int):
         tp = live_price * (1 - K_PROFIT * cur_vol)
         sl = live_price * (1 + K_STOP * cur_vol)
 
-    return {
-        "side": side,
+    qty = position_qty_btc(live_price, sl)
+    base.update({
         "confidence": confidence,
-        "buy_proba": buy_p,
-        "sell_proba": sell_p,
-        "hold_proba": hold_p,
-        "price": live_price,
         "take_profit": tp,
         "stop_loss": sl,
-        "volatility": cur_vol
-    }
+        "qty_btc": qty,
+    })
+    return base
