@@ -41,7 +41,14 @@ TIMEFRAMES = {
     "1D":  {"resolution": "1d",  "days": 300, "max_holding": 15, "label": "Daily","hold": "~15d"},
 }
 
-ASSETS = ["BTCUSD", "ETHUSD", "SOLUSD"]
+ASSETS = ["BTCUSD", "ETHUSD", "SOLUSD", "XAUTUSD", "PAXGUSD"]
+ASSET_LABELS = {
+    "BTCUSD": "BTC",
+    "ETHUSD": "ETH",
+    "SOLUSD": "SOL",
+    "XAUTUSD": "XAUT",
+    "PAXGUSD": "PAXG",
+}
 
 if "symbol" not in st.session_state:
     st.session_state.symbol = "BTCUSD"
@@ -184,12 +191,12 @@ def make_colored_table(df, extra_signal_cols=None):
 
 # -------------------- HEADER --------------------
 st.markdown("### Leverage Signal")
-st.caption(f"Model + Candles + Paper Check · {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"Model + Candles + Gold + Paper Check · {datetime.now().strftime('%H:%M:%S')}")
 
 cols = st.columns(len(ASSETS))
 for col, sym in zip(cols, ASSETS):
     with col:
-        if st.button(sym.replace("USD", ""), key=f"a_{sym}", use_container_width=True):
+        if st.button(ASSET_LABELS.get(sym, sym.replace("USD", "")), key=f"a_{sym}", use_container_width=True):
             st.session_state.symbol = sym
             st.rerun()
 
@@ -197,9 +204,12 @@ symbol = st.session_state.symbol
 ticker = fetch_ticker(symbol)
 live_price = float(ticker.get("close", ticker.get("mark_price", 0)) or 0)
 chg = float(ticker.get("price_change_24h", 0.0)) * 100
+name = ASSET_LABELS.get(symbol, symbol.replace("USD", ""))
 
-st.markdown(f"## {symbol.replace('USD','')}  ${live_price:,.2f}")
+st.markdown(f"## {name}  ${live_price:,.2f}")
 st.markdown(f"{'+' if chg >= 0 else ''}{chg:.2f}% (24h)")
+if symbol in ("XAUTUSD", "PAXGUSD"):
+    st.caption("Tokenized gold (~1 troy oz). Not Bitcoin. Paper bot still trades BTC only.")
 
 model_rows = []
 candle_rows = []
@@ -278,10 +288,9 @@ st.markdown("---")
 st.subheader("3) Do they agree?")
 st.markdown(make_colored_table(pd.DataFrame(compare_rows)), unsafe_allow_html=True)
 
-# ==================== PAPER TRADING ON DASHBOARD ====================
 st.markdown("---")
 st.subheader("Paper Trading")
-st.caption("Tap the button to open/close paper trades from this page. No GitHub terminal needed.")
+st.caption("Paper bot still runs on BTCUSD only. Gold buttons are for viewing / predicting.")
 
 if st.button("Run Paper Check Now", use_container_width=True):
     try:
@@ -329,8 +338,6 @@ if trades_df is not None and not trades_df.empty:
     m4.metric("Total PnL", f"{total_pnl:+.2f}%")
 else:
     st.write("No closed paper trades yet.")
-
-st.caption("On Streamlit Cloud, saved trades can reset if the app sleeps. GitHub Action is the backup 30-min runner.")
 
 time.sleep(30)
 st.rerun()
